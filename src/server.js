@@ -18,6 +18,7 @@ const emergencyRoutes = require('./routes/emergency.routes');
 const auditRoutes = require('./routes/audit.routes');
 const evaluationsRoutes = require('./routes/evaluations.routes');
 const usersRoutes = require('./routes/users.routes');
+const settingsRoutes = require('./routes/settings.routes');
 
 const app = express();
 
