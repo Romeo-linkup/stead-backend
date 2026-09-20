@@ -19,7 +19,7 @@ const upload = multer({
 
 router.get('/', auth, requireRole('owner', 'admin', 'tenant', 'service_provider'), listMaintenance);
 router.post('/', auth, requireRole('tenant'), upload.single('photo'), createMaintenance);
-router.patch('/:id/assign', auth, requireRole('owner', 'admin'), assignMaintenance);
+router.patch('/:id/assign', auth, requireRole('owner', 'admin', 'property_manager'), assignMaintenance);
 router.patch('/:id/accept', auth, requireRole('service_provider'), acceptMaintenance);
 router.patch('/:id/complete', auth, requireRole('service_provider'), upload.single('after'), completeMaintenance);
 
