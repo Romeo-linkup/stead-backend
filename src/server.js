@@ -41,6 +41,7 @@ app.use('/emergency', emergencyRoutes);
 app.use('/audit', auditRoutes);
 app.use('/evaluations', evaluationsRoutes);
 app.use('/users', usersRoutes);
+app.use('/settings', settingsRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found.' }));
 app.use(errorHandler);
