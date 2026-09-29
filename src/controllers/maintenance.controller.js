@@ -2,14 +2,23 @@ const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { uploadImage } = require('../services/cloudinary.service');
 
+// Every branch below returns the same shape: the maintenance row plus the
+// unit/property/district it belongs to and, when assigned, the provider's
+// name. Only the WHERE clause differs per role.
+const MAINTENANCE_SELECT = `
+  SELECT mr.*, u.unit_number, p.name AS property_name, p.district_id,
+         d.name AS district_name, a.name AS assigned_to_name, mr.updated_at
+  FROM maintenance_requests mr
+  JOIN units u ON u.id = mr.unit_id
+  JOIN properties p ON p.id = u.property_id
+  JOIN districts d ON d.id = p.district_id
+  LEFT JOIN users a ON a.id = mr.assigned_to`;
+
 async function listMaintenance(req, res, next) {
   try {
     if (req.user.role === 'tenant') {
       const { rows } = await pool.query(
-        `SELECT mr.*, u.unit_number, p.name AS property_name
-         FROM maintenance_requests mr
-         JOIN units u ON u.id = mr.unit_id
-         JOIN properties p ON p.id = u.property_id
+        `${MAINTENANCE_SELECT}
          WHERE u.tenant_user_id = $1
          ORDER BY mr.created_at DESC`,
         [req.user.user_id]
@@ -19,10 +28,7 @@ async function listMaintenance(req, res, next) {
 
     if (req.user.role === 'service_provider') {
       const { rows } = await pool.query(
-        `SELECT mr.*, u.unit_number, p.name AS property_name
-         FROM maintenance_requests mr
-         JOIN units u ON u.id = mr.unit_id
-         JOIN properties p ON p.id = u.property_id
+        `${MAINTENANCE_SELECT}
          WHERE mr.assigned_to = $1
          ORDER BY mr.created_at DESC`,
         [req.user.user_id]
@@ -32,20 +38,14 @@ async function listMaintenance(req, res, next) {
 
     if (req.user.role === 'owner') {
       const { rows } = await pool.query(
-        `SELECT mr.*, u.unit_number, p.name AS property_name
-         FROM maintenance_requests mr
-         JOIN units u ON u.id = mr.unit_id
-         JOIN properties p ON p.id = u.property_id
+        `${MAINTENANCE_SELECT}
          ORDER BY mr.created_at DESC`
       );
       return res.json(rows);
     }
 
     const { rows } = await pool.query(
-      `SELECT mr.*, u.unit_number, p.name AS property_name
-       FROM maintenance_requests mr
-       JOIN units u ON u.id = mr.unit_id
-       JOIN properties p ON p.id = u.property_id
+      `${MAINTENANCE_SELECT}
        WHERE p.district_id = $1
        ORDER BY mr.created_at DESC`,
       [req.user.district_id]
@@ -133,7 +133,7 @@ async function assignMaintenance(req, res, next) {
     }
 
     const requestResult = await pool.query(
-      `SELECT mr.id, mr.unit_id, p.district_id
+      `SELECT mr.id, mr.unit_id, mr.status, p.district_id
        FROM maintenance_requests mr
        JOIN units u ON u.id = mr.unit_id
        JOIN properties p ON p.id = u.property_id
@@ -145,25 +145,42 @@ async function assignMaintenance(req, res, next) {
     if (!request) {
       return res.status(404).json({ error: 'Maintenance request not found.' });
     }
+    // District check before anything else role-specific, so a district admin
+    // cannot probe the status of another district's requests.
     if (req.user.role !== 'owner' && request.district_id !== req.user.district_id) {
       return res.status(403).json({ error: 'You can only assign requests in your district.' });
+    }
+    // Reassigning is allowed, but only while the task is still unclaimed —
+    // the provider's accept is what moves it to 'pending'.
+    if (request.status !== 'outstanding') {
+      return res.status(409).json({ error: `Only outstanding requests can be assigned (this one is ${request.status}).` });
     }
 
     const providerResult = await pool.query(
       `SELECT id FROM users
-       WHERE id = $1 AND role = 'service_provider'
-         AND ($2 = 'owner' OR district_id = $3)`,
-      [providerId, req.user.role, req.user.district_id]
+       WHERE id = $1 AND role = 'service_provider' AND district_id = $2`,
+      [providerId, request.district_id]
     );
     if (!providerResult.rows[0]) {
-      return res.status(404).json({ error: 'Service provider not found.' });
+      return res.status(400).json({ error: 'Service provider not found in that district.' });
     }
 
+    // UPDATE ... RETURNING cannot join, so wrap it in a CTE to hand back the
+    // same enriched shape as GET /maintenance.
     const { rows } = await pool.query(
-      `UPDATE maintenance_requests
-       SET assigned_to = $1, status = CASE WHEN status = 'outstanding' THEN 'pending' ELSE status END, updated_at = now()
-       WHERE id = $2
-       RETURNING *`,
+      `WITH updated AS (
+         UPDATE maintenance_requests
+         SET assigned_to = $1, updated_at = now()
+         WHERE id = $2
+         RETURNING *
+       )
+       SELECT mr.*, u.unit_number, p.name AS property_name, p.district_id,
+              d.name AS district_name, a.name AS assigned_to_name
+       FROM updated mr
+       JOIN units u ON u.id = mr.unit_id
+       JOIN properties p ON p.id = u.property_id
+       JOIN districts d ON d.id = p.district_id
+       LEFT JOIN users a ON a.id = mr.assigned_to`,
       [providerId, requestId]
     );
     const updatedRequest = rows[0];
@@ -175,7 +192,7 @@ async function assignMaintenance(req, res, next) {
       action: 'maintenance.assign',
       entityType: 'maintenance_request',
       entityId: requestId,
-      metadata: { unit_id: request.unit_id, assigned_to: providerId },
+      metadata: { assigned_to: providerId },
     });
 
     res.json(updatedRequest);

@@ -72,28 +72,46 @@ async function updateProfile(req, res, next) {
   }
 }
 
-// NEW: needed by admin/tenants.page.js (tenant names) and
-// admin/maintenance.page.js (provider list for assignment).
+// Needed by admin/maintenance.page.js for the provider list in the assign
+// dropdown. Deliberately narrow: service providers only, and only the fields
+// that dropdown needs. Never expose code_id / code or any other user data.
 async function listUsers(req, res, next) {
   try {
-    const { role } = req.query;
-    const clauses = [];
-    const values = [];
-    let i = 1;
+    const { role, district_id: districtFilter } = req.query;
 
-    if (req.user.role !== 'owner') {
-      clauses.push(`district_id = $${i++}`);
+    if (role !== 'service_provider') {
+      return res.status(400).json({ error: "role must be 'service_provider'." });
+    }
+
+    const clauses = ['u.role = $1'];
+    const values = ['service_provider'];
+    let i = 2;
+
+    // district_id is an owner-only convenience filter. For everyone else the
+    // scope comes from the session, so a district admin cannot read another
+    // district's providers by passing a different id.
+    const ownerFilter =
+      req.user.role === 'owner' && districtFilter !== undefined && districtFilter !== ''
+        ? Number(districtFilter)
+        : null;
+
+    if (ownerFilter !== null) {
+      if (!Number.isInteger(ownerFilter) || ownerFilter < 1) {
+        return res.status(400).json({ error: 'district_id must be a valid district ID.' });
+      }
+      clauses.push(`u.district_id = $${i++}`);
+      values.push(ownerFilter);
+    } else if (req.user.role !== 'owner' && req.user.district_id) {
+      clauses.push(`u.district_id = $${i++}`);
       values.push(req.user.district_id);
     }
-    if (role) {
-      clauses.push(`role = $${i++}`);
-      values.push(role);
-    }
 
-    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const { rows } = await pool.query(
-      `SELECT id, name, phone, role, district_id, service_specialty
-       FROM users ${where} ORDER BY name ASC`,
+      `SELECT u.id, u.name, u.phone, u.district_id, d.name AS district_name
+       FROM users u
+       LEFT JOIN districts d ON d.id = u.district_id
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY u.name ASC`,
       values
     );
     res.json(rows);
