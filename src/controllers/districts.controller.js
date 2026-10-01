@@ -9,10 +9,28 @@ async function listDistricts(req, res, next) {
     // their own via requireDistrictAccess on the route, but listing is
     // still useful to them scoped to themselves — so filter here too.
     if (req.user.role === 'owner') {
-      const { rows } = await pool.query('SELECT * FROM districts ORDER BY name');
+      const { rows } = await pool.query(`
+        SELECT districts.*,
+               COUNT(DISTINCT properties.id) AS property_count,
+               COUNT(DISTINCT units.id) AS unit_count
+        FROM districts
+        LEFT JOIN properties ON properties.district_id = districts.id
+        LEFT JOIN units ON units.property_id = properties.id
+        GROUP BY districts.id
+        ORDER BY districts.name
+      `);
       return res.json(rows);
     }
-    const { rows } = await pool.query('SELECT * FROM districts WHERE id = $1', [req.user.district_id]);
+    const { rows } = await pool.query(`
+      SELECT districts.*,
+             COUNT(DISTINCT properties.id) AS property_count,
+             COUNT(DISTINCT units.id) AS unit_count
+      FROM districts
+      LEFT JOIN properties ON properties.district_id = districts.id
+      LEFT JOIN units ON units.property_id = properties.id
+      WHERE districts.id = $1
+      GROUP BY districts.id
+    `, [req.user.district_id]);
     res.json(rows);
   } catch (err) {
     next(err);

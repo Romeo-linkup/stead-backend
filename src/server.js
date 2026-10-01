@@ -19,6 +19,9 @@ const auditRoutes = require('./routes/audit.routes');
 const evaluationsRoutes = require('./routes/evaluations.routes');
 const usersRoutes = require('./routes/users.routes');
 const settingsRoutes = require('./routes/settings.routes');
+const districtInfoRoutes = require('./routes/districtInfo.routes');
+const noticesRoutes = require('./routes/notices.routes');
+const moveOutRoutes = require('./routes/moveOut.routes');
 
 const app = express();
 
@@ -42,6 +45,10 @@ app.use('/audit', auditRoutes);
 app.use('/evaluations', evaluationsRoutes);
 app.use('/users', usersRoutes);
 app.use('/settings', settingsRoutes);
+app.use('/app-settings', settingsRoutes);
+app.use('/district-info', districtInfoRoutes);
+app.use('/notices', noticesRoutes);
+app.use('/move-out-notices', moveOutRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found.' }));
 app.use(errorHandler);

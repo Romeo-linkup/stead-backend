@@ -5,19 +5,29 @@ async function listProperties(req, res, next) {
   try {
     if (req.user.role === 'owner') {
       const { rows } = await pool.query(
-        `SELECT p.*, pcs.score_percent AS current_score, pcs.created_at AS score_created_at
+        `SELECT p.*, d.name AS district_name,
+          COUNT(DISTINCT u.id) AS unit_count,
+          pcs.score_percent AS current_score, pcs.created_at AS score_created_at
          FROM properties p
+         JOIN districts d ON d.id = p.district_id
+         LEFT JOIN units u ON u.property_id = p.id
          LEFT JOIN property_current_score pcs ON pcs.property_id = p.id
+         GROUP BY p.id, d.id, pcs.score_percent, pcs.created_at
          ORDER BY p.created_at DESC`
       );
       return res.json(rows);
     }
 
     const { rows } = await pool.query(
-      `SELECT p.*, pcs.score_percent AS current_score, pcs.created_at AS score_created_at
+      `SELECT p.*, d.name AS district_name,
+              COUNT(DISTINCT u.id) AS unit_count,
+              pcs.score_percent AS current_score, pcs.created_at AS score_created_at
        FROM properties p
+       JOIN districts d ON d.id = p.district_id
+       LEFT JOIN units u ON u.property_id = p.id
        LEFT JOIN property_current_score pcs ON pcs.property_id = p.id
        WHERE p.district_id = $1
+       GROUP BY p.id, d.id, pcs.score_percent, pcs.created_at
        ORDER BY p.created_at DESC`,
       [req.user.district_id]
     );
