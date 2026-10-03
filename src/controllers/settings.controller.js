@@ -4,7 +4,10 @@ const { writeAudit } = require('../services/audit.service');
 
 async function getSettings(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT business_name, notice_period_months FROM app_settings WHERE id = 1');
+    const { rows } = await pool.query(
+      `SELECT business_name, COALESCE(notice_period_months, 3)::integer AS notice_period_months
+       FROM app_settings WHERE id = 1`
+    );
     res.json(rows[0] || { business_name: 'Your Property Business', notice_period_months: 3 });
   } catch (err) {
     next(err);
@@ -15,10 +18,7 @@ async function updateSettings(req, res, next) {
   try {
     const input = req.body || {};
     if (Object.prototype.hasOwnProperty.call(input, 'notice_period_months')) {
-      if (Object.keys(input).length !== 1) {
-        return res.status(400).json({ error: 'Update one setting at a time.' });
-      }
-      return updateNoticePeriod(req, res, next);
+      return res.status(400).json({ error: 'Use the dedicated notice-period setting route.' });
     }
 
     if (req.user.role !== 'owner') {

@@ -214,6 +214,13 @@ async function acceptMaintenance(req, res, next) {
     const request = rows[0];
 
     if (!request) {
+      const requestExists = await pool.query(
+        'SELECT id, assigned_to FROM maintenance_requests WHERE id = $1',
+        [requestId]
+      );
+      if (requestExists.rows[0] && requestExists.rows[0].assigned_to !== req.user.user_id) {
+        return res.status(403).json({ error: 'You can only accept tasks assigned to you.' });
+      }
       return res.status(404).json({ error: 'Assigned maintenance request not found.' });
     }
 
@@ -237,6 +244,13 @@ async function completeMaintenance(req, res, next) {
     const request = requestResult.rows[0];
 
     if (!request) {
+      const requestExists = await pool.query(
+        'SELECT id, assigned_to FROM maintenance_requests WHERE id = $1',
+        [requestId]
+      );
+      if (requestExists.rows[0] && requestExists.rows[0].assigned_to !== req.user.user_id) {
+        return res.status(403).json({ error: 'You can only complete tasks assigned to you.' });
+      }
       return res.status(404).json({ error: 'Assigned maintenance request not found.' });
     }
     if (request.status === 'finished') {

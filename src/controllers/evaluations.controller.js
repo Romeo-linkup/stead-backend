@@ -4,17 +4,27 @@ const { writeAudit } = require('../services/audit.service');
 async function createEvaluation(req, res, next) {
 	try {
 		const propertyId = Number(req.body.property_id);
-		const score = Number(req.body.score_percent);
-		const notes = req.body.notes;
+		const scoreInput = req.body.score_percent;
+		const score = Number(scoreInput);
+		const scoreText = typeof scoreInput === 'number' || typeof scoreInput === 'string'
+			? String(scoreInput).trim()
+			: '';
+		let notes = req.body.notes;
 
 		if (!Number.isInteger(propertyId) || propertyId < 1) {
 			return res.status(400).json({ error: 'A valid property_id is required.' });
 		}
-		if (!Number.isFinite(score) || score < 0 || score > 100) {
+		if (!Number.isFinite(score) || score < 0 || score > 100
+			|| !/^-?(?:\d+(?:\.\d{1,2})?|\.\d{1,2})$/.test(scoreText)) {
 			return res.status(400).json({ error: 'score_percent must be between 0 and 100.' });
 		}
 		if (notes !== undefined && notes !== null && typeof notes !== 'string') {
 			return res.status(400).json({ error: 'notes must be text.' });
+		}
+		if (typeof notes === 'string') {
+			notes = notes.trim();
+			if (notes.length > 500) return res.status(400).json({ error: 'notes must be 500 characters or fewer.' });
+			if (!notes) notes = null;
 		}
 
 		const propertyResult = await pool.query(
@@ -32,7 +42,7 @@ async function createEvaluation(req, res, next) {
 			`INSERT INTO property_evaluations (property_id, evaluated_by, score_percent, notes)
 			 VALUES ($1, $2, $3, $4)
 			 RETURNING *`,
-			[propertyId, req.user.user_id, score, notes ? notes.trim() : null]
+			[propertyId, req.user.user_id, score, notes]
 		);
 		const evaluation = rows[0];
 
@@ -77,4 +87,59 @@ async function getAverageScore(req, res, next) {
 	}
 }
 
-module.exports = { createEvaluation, getAverageScore };
+async function getEvaluationSummary(req, res, next) {
+	try {
+		const params = [];
+		const districtFilter = req.user.role === 'owner' ? '' : 'WHERE d.id = $1';
+		if (req.user.role !== 'owner') params.push(req.user.district_id);
+
+		const { rows } = await pool.query(
+			`SELECT d.id AS district_id, d.name AS district_name,
+			        COUNT(p.id)::int AS property_count,
+			        COUNT(s.property_id)::int AS evaluated_count,
+			        COALESCE(SUM(s.score_percent), 0) AS score_sum
+			 FROM districts d
+			 JOIN properties p ON p.district_id = d.id
+			 LEFT JOIN property_current_score s ON s.property_id = p.id
+			 ${districtFilter}
+			 GROUP BY d.id, d.name
+			 ORDER BY d.name`,
+			params
+		);
+
+		const districts = rows.map((row) => {
+			const propertyCount = Number(row.property_count);
+			const evaluatedCount = Number(row.evaluated_count);
+			const complete = propertyCount > 0 && evaluatedCount === propertyCount;
+			return {
+				district_id: row.district_id,
+				district_name: row.district_name,
+				property_count: propertyCount,
+				evaluated_count: evaluatedCount,
+				complete,
+				average_score: complete
+					? Number((Number(row.score_sum) / propertyCount).toFixed(1))
+					: null,
+			};
+		});
+
+		const propertyCount = districts.reduce((sum, district) => sum + district.property_count, 0);
+		const evaluatedCount = districts.reduce((sum, district) => sum + district.evaluated_count, 0);
+		const scoreSum = rows.reduce((sum, row) => sum + Number(row.score_sum), 0);
+		const complete = propertyCount > 0 && evaluatedCount === propertyCount;
+
+		res.json({
+			districts,
+			portfolio: {
+				property_count: propertyCount,
+				evaluated_count: evaluatedCount,
+				complete,
+				average_score: complete ? Number((scoreSum / propertyCount).toFixed(1)) : null,
+			},
+		});
+	} catch (err) {
+		next(err);
+	}
+}
+
+module.exports = { createEvaluation, getAverageScore, getEvaluationSummary };

@@ -1,0 +1,8 @@
+ALTER TABLE leases ADD COLUMN IF NOT EXISTS lessor_signature_url TEXT;
+ALTER TABLE leases ADD COLUMN IF NOT EXISTS lessor_signed_at TIMESTAMPTZ;
+ALTER TABLE leases ADD COLUMN IF NOT EXISTS lessor_signed_by INTEGER REFERENCES users(id);
+CREATE TABLE IF NOT EXISTS lessor_saved_signatures (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  image_url TEXT NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);

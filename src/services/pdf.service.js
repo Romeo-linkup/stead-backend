@@ -2,13 +2,23 @@
 // Uses Newsreader serif font for document look, matching Section 7 design tokens
 
 function renderLeaseHtml(lease) {
-  const terms = typeof lease.terms_json === 'string' 
-    ? JSON.parse(lease.terms_json) 
-    : lease.terms_json || {};
+  let terms = {};
+  try {
+    const parsedTerms = typeof lease.terms_json === 'string'
+      ? JSON.parse(lease.terms_json)
+      : lease.terms_json;
+    if (parsedTerms && typeof parsedTerms === 'object' && !Array.isArray(parsedTerms)) {
+      terms = parsedTerms;
+    }
+  } catch {
+    terms = {};
+  }
 
   const formatDate = (date) => {
-    if (!date) return '';
-    return new Date(date).toLocaleDateString('en-ZA', {
+    if (date == null || date === '') return '';
+    const parsedDate = new Date(date);
+    if (Number.isNaN(parsedDate.getTime())) return '';
+    return parsedDate.toLocaleDateString('en-ZA', {
       year: 'numeric',
       month: 'long',
       day: 'numeric'
@@ -16,133 +26,125 @@ function renderLeaseHtml(lease) {
   };
 
   const formatCurrency = (amount) => {
-    if (!amount) return '';
-    return `R${Number(amount).toLocaleString('en-ZA')}`;
+    if (amount == null || amount === '') return '';
+    const value = Number(amount);
+    if (!Number.isFinite(value)) return '';
+    return `R${value.toLocaleString('en-ZA')}`;
   };
 
-  return `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Lease Agreement</title>
+  const clause = (key, fallback) => escapeHtml(terms[key] || fallback);
+  const status = String(lease.status == null ? '' : lease.status);
+  const cancellationNotice = Number.isInteger(terms.notice_period_months)
+    && terms.notice_period_months >= 1
+    && terms.notice_period_months <= 12
+    ? `Either party may terminate this lease by giving ${terms.notice_period_months} calendar months' written notice.`
+    : `Either party may terminate this lease by giving ${lease.cancellation_notice_days == null ? '30' : lease.cancellation_notice_days} days' written notice.`;
+  const cancellationPenalty = lease.cancellation_penalty == null || lease.cancellation_penalty === ''
+    ? ''
+    : ` A cancellation penalty of ${formatCurrency(lease.cancellation_penalty)} shall apply for early termination.`;
+  const lessorSignatureImage = typeof lease.lessor_signature_url === 'string'
+    && lease.lessor_signature_url.startsWith('https://')
+    ? `<img class="sig-img" src="${escapeHtml(lease.lessor_signature_url)}" alt="Lessor signature" style="max-height:80px;display:block;">`
+    : '';
+  const lesseeSignatureImage = typeof lease.signature_image_url === 'string'
+    && lease.signature_image_url.startsWith('https://')
+    ? `<img class="sig-img" src="${escapeHtml(lease.signature_image_url)}" alt="Lessee signature" style="max-height:80px;display:block;">`
+    : '';
+
+  return `<div class="lease-doc">
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&display=swap');
-    
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-    
-    body {
-      font-family: 'Newsreader', Georgia, serif;
-      background: #F6F4EE;
+    .lease-doc {
+      background: #fff;
       color: #1C2321;
-      line-height: 1.6;
-      padding: 40px 20px;
-    }
-    
-    .document {
+      color-scheme: light;
+      font-family: 'Newsreader', Georgia, serif;
       max-width: 800px;
       margin: 0 auto;
-      background: white;
-      padding: 60px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      padding: clamp(20px, 5vw, 60px);
+      box-sizing: border-box;
+      border: 1px solid #DAD3C2;
+      border-radius: 4px;
+      line-height: 1.6;
     }
-    
-    h1 {
+    .lease-doc h1 {
       font-size: 28px;
       font-weight: 600;
       text-align: center;
       margin-bottom: 8px;
       color: #1C2321;
     }
-    
-    .subtitle {
+    .lease-doc .subtitle {
       text-align: center;
       font-size: 14px;
       color: #5B6570;
       margin-bottom: 40px;
       font-style: italic;
     }
-    
-    .section {
+    .lease-doc .section {
       margin-bottom: 32px;
     }
-    
-    h2 {
+    .lease-doc h2 {
       font-size: 18px;
       font-weight: 600;
       margin-bottom: 12px;
       color: #1C2321;
     }
-    
-    .parties {
+    .lease-doc .parties {
       margin-bottom: 32px;
       padding: 20px;
       background: #F6F4EE;
       border-radius: 4px;
     }
-    
-    .party {
+    .lease-doc .party {
       margin-bottom: 16px;
     }
-    
-    .party-label {
+    .lease-doc .party-label {
       font-weight: 600;
       font-size: 14px;
       margin-bottom: 4px;
     }
-    
-    .party-details {
+    .lease-doc .party-details {
       font-size: 14px;
       line-height: 1.5;
     }
-    
-    .clause {
+    .lease-doc .clause {
       margin-bottom: 20px;
     }
-    
-    .clause-number {
+    .lease-doc .clause-number {
       font-weight: 600;
       margin-right: 8px;
     }
-    
-    .clause-title {
+    .lease-doc .clause-title {
       font-weight: 600;
       margin-bottom: 8px;
     }
-    
-    .clause-content {
+    .lease-doc .clause-content {
       font-size: 14px;
       line-height: 1.6;
       white-space: pre-wrap;
     }
-    
-    .signature-section {
+    .lease-doc .signature-section {
       margin-top: 48px;
       padding-top: 32px;
       border-top: 1px solid #DAD3C2;
     }
-    
-    .signature-block {
+    .lease-doc .signature-block {
       margin-bottom: 32px;
     }
-    
-    .signature-line {
+    .lease-doc .signature-line {
       border-bottom: 1px solid #1C2321;
       margin-top: 40px;
       margin-bottom: 8px;
     }
-    
-    .signature-label {
+    .lease-doc .signature-label {
       font-size: 12px;
       color: #5B6570;
     }
-    
-    .status {
+    .lease-doc .sig-img {
+      max-height: 80px;
+      display: block;
+    }
+    .lease-doc .status {
       text-align: center;
       padding: 12px;
       margin-bottom: 24px;
@@ -150,34 +152,31 @@ function renderLeaseHtml(lease) {
       font-weight: 600;
       font-size: 14px;
     }
-    
-    .status.draft {
+    .lease-doc .status.draft {
       background: #EDE8DC;
       color: #5B6570;
     }
-    
-    .status.sent {
+    .lease-doc .status.sent {
       background: #FEF3E2;
       color: #A8823A;
     }
-    
-    .status.signed {
+    .lease-doc .status.signed {
       background: #E8F5E9;
       color: #3F6B4E;
     }
-    
-    .status.expired {
+    .lease-doc .status.expired {
       background: #FEE2E2;
       color: #A14E3B;
     }
+    .lease-doc .status.superseded {
+      background: #EDE8DC;
+      color: #5B6570;
+    }
   </style>
-</head>
-<body>
-  <div class="document">
     <h1>RESIDENTIAL LEASE AGREEMENT</h1>
-    <div class="subtitle">This agreement is made and entered into on ${formatDate(lease.created_at)}</div>
+    <div class="subtitle">This agreement is made and entered into on ${escapeHtml(formatDate(lease.created_at))}</div>
     
-    <div class="status ${lease.status}">${lease.status.toUpperCase()}</div>
+    <div class="status ${escapeHtml(status)}">${escapeHtml(status.toUpperCase())}</div>
     
     <div class="parties">
       <div class="party">
@@ -199,112 +198,107 @@ function renderLeaseHtml(lease) {
     <div class="section">
       <h2>1. DURATION</h2>
       <div class="clause-content">
-        This lease shall commence on ${formatDate(lease.start_date)} and continue for a period of ${lease.duration_months} months, expiring on ${formatDate(lease.end_date)}.
+        This lease shall commence on ${escapeHtml(formatDate(lease.start_date))} and continue for a period of ${escapeHtml(lease.duration_months)} months, expiring on ${escapeHtml(formatDate(lease.end_date))}.
       </div>
     </div>
     
     <div class="section">
       <h2>2. RENT</h2>
       <div class="clause-content">
-        The monthly rental shall be ${formatCurrency(lease.rent_amount)}, payable in advance on the first day of each month.
-        ${lease.rent_increase_pct ? ` The rent may be increased by ${lease.rent_increase_pct}% upon renewal.` : ''}
+        The monthly rental shall be ${escapeHtml(formatCurrency(lease.rent_amount))}, payable in advance on the first day of each month.
+        ${lease.rent_increase_pct == null || lease.rent_increase_pct === '' ? '' : ` The rent may be increased by ${escapeHtml(lease.rent_increase_pct)}% upon renewal.`}
       </div>
     </div>
     
     <div class="section">
       <h2>3. ADDITIONAL CHARGES</h2>
       <div class="clause-content">
-        ${terms.additional_charges || 'The tenant shall be responsible for utilities and services as specified in the schedule.'}
+        ${clause('additional_charges', 'The tenant shall be responsible for utilities and services as specified in the schedule.')}
       </div>
     </div>
     
     <div class="section">
       <h2>4. PAYMENTS</h2>
       <div class="clause-content">
-        ${terms.payments || 'Rent shall be paid by electronic transfer to the landlord\'s designated bank account. The tenant shall provide proof of payment upon request.'}
+        ${clause('payments', 'Rent shall be paid by electronic transfer to the landlord\'s designated bank account. The tenant shall provide proof of payment upon request.')}
       </div>
     </div>
     
     <div class="section">
       <h2>5. DEPOSIT</h2>
       <div class="clause-content">
-        A deposit of ${formatCurrency(lease.deposit_amount)} shall be paid prior to occupation. This deposit shall be returned within 14 days of lease termination, less any deductions for damages or outstanding amounts.
+        A deposit of ${escapeHtml(formatCurrency(lease.deposit_amount))} shall be paid prior to occupation. This deposit shall be returned within 14 days of lease termination, less any deductions for damages or outstanding amounts.
       </div>
     </div>
     
     <div class="section">
       <h2>6. CANCELLATION</h2>
       <div class="clause-content">
-        Either party may terminate this lease by giving ${lease.cancellation_notice_days || '30'} days\' written notice.
-        ${lease.cancellation_penalty ? `A cancellation penalty of ${formatCurrency(lease.cancellation_penalty)} shall apply for early termination.` : ''}
+        ${escapeHtml(cancellationNotice)}${escapeHtml(cancellationPenalty)}
       </div>
     </div>
     
     <div class="section">
       <h2>7. PETS</h2>
       <div class="clause-content">
-        ${terms.pets || 'No pets shall be kept on the premises without the landlord\'s prior written consent.'}
+        ${clause('pets', 'No pets shall be kept on the premises without the landlord\'s prior written consent.')}
       </div>
     </div>
     
     <div class="section">
       <h2>8. ASSIGNMENT & SUBLETTING</h2>
       <div class="clause-content">
-        ${terms.assignment_subletting || 'The tenant shall not assign or sublet the premises without the landlord\'s prior written consent.'}
+        ${clause('assignment_subletting', 'The tenant shall not assign or sublet the premises without the landlord\'s prior written consent.')}
       </div>
     </div>
     
     <div class="section">
       <h2>9. SUNDRY DUTIES</h2>
       <div class="clause-content">
-        ${terms.sundry_duties || 'The tenant shall keep the premises in a clean and habitable condition, and shall comply with all reasonable rules and regulations of the property.'}
+        ${clause('sundry_duties', 'The tenant shall keep the premises in a clean and habitable condition, and shall comply with all reasonable rules and regulations of the property.')}
       </div>
     </div>
     
     <div class="section">
       <h2>10. MAINTENANCE</h2>
       <div class="clause-content">
-        ${terms.maintenance || 'The landlord shall be responsible for structural maintenance, while the tenant shall be responsible for day-to-day maintenance and minor repairs.'}
+        ${clause('maintenance', 'The landlord shall be responsible for structural maintenance, while the tenant shall be responsible for day-to-day maintenance and minor repairs.')}
       </div>
     </div>
     
     <div class="section">
       <h2>11. SPECIAL REMEDY</h2>
       <div class="clause-content">
-        ${terms.special_remedy || 'In the event of breach, the landlord shall have all remedies available at law and equity, including but not limited to eviction and damages.'}
+        ${clause('special_remedy', 'In the event of breach, the landlord shall have all remedies available at law and equity, including but not limited to eviction and damages.')}
       </div>
     </div>
     
     <div class="section">
       <h2>12. OPTION OF RENEWAL</h2>
       <div class="clause-content">
-        ${terms.option_of_renewal || 'This lease may be renewed upon mutual agreement of both parties, subject to rent adjustment and terms to be negotiated.'}
+        ${clause('option_of_renewal', 'This lease may be renewed upon mutual agreement of both parties, subject to rent adjustment and terms to be negotiated.')}
       </div>
     </div>
     
-    ${lease.status === 'signed' ? `
     <div class="signature-section">
       <div class="signature-block">
+        ${lessorSignatureImage}
         <div class="signature-line"></div>
         <div class="signature-label">LESSOR SIGNATURE</div>
-        <div class="signature-label">Signed: ${formatDate(lease.signed_at)}</div>
+        <div class="signature-label">${lessorSignatureImage ? `Signed: ${escapeHtml(formatDate(lease.lessor_signed_at))}` : 'Not yet signed'}</div>
       </div>
       <div class="signature-block">
+        ${lesseeSignatureImage}
         <div class="signature-line"></div>
         <div class="signature-label">LESSEE SIGNATURE</div>
-        <div class="signature-label">Signed: ${formatDate(lease.signed_at)}</div>
+        <div class="signature-label">${lesseeSignatureImage ? `Signed: ${escapeHtml(formatDate(lease.signed_at))}` : 'Not yet signed'}</div>
       </div>
     </div>
-    ` : ''}
-  </div>
-</body>
-</html>
-  `.trim();
+  </div>`;
 }
 
 function escapeHtml(text) {
-  if (!text) return '';
-  return text
+  return String(text == null ? '' : text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

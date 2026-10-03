@@ -117,11 +117,35 @@ async function getUnit(req, res, next) {
       return res.status(404).json({ error: 'Unit not found.' });
     }
 
-    if (req.user.role !== 'admin' && unit.tenant_user_id !== req.user.user_id) {
+    if (req.user.role === 'service_provider') {
       return res.status(403).json({ error: 'You do not have access to that unit.' });
     }
 
-    res.json(unit);
+    if (req.user.role === 'tenant') {
+      if (unit.tenant_user_id !== req.user.user_id) {
+        return res.status(403).json({ error: 'You do not have access to that unit.' });
+      }
+      return res.json(unit);
+    }
+
+    if (req.user.role === 'owner') {
+      return res.json(unit);
+    }
+
+    if (req.user.role === 'admin' || req.user.role === 'property_manager') {
+      const propertyResult = await pool.query(
+        'SELECT district_id FROM properties WHERE id = $1',
+        [unit.property_id]
+      );
+      const property = propertyResult.rows[0];
+
+      if (!property || property.district_id !== req.user.district_id) {
+        return res.status(403).json({ error: 'You do not have access to that unit.' });
+      }
+      return res.json(unit);
+    }
+
+    return res.status(403).json({ error: 'You do not have access to that unit.' });
   } catch (err) {
     next(err);
   }

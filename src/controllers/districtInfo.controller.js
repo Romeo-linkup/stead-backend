@@ -10,12 +10,16 @@ const DEFAULT_SECTIONS = {
     'Pets are only allowed where your lease specifically permits them.',
   ].join('\n'),
   utilities: 'Water is metered per unit and billed with rent. Electricity is prepaid — load tokens using your meter number. If a meter looks faulty, log a maintenance request rather than adjusting it yourself.',
-  leaving_property: "Two calendar months' written notice is required before moving out. A joint inspection is done before keys are handed back, and your deposit is refunded after that, less any damage beyond fair wear and tear.",
-  contacts: "For anything non-urgent, use Messages so there's a written record. For a genuine emergency, use the SOS button at the top of the screen.",
+  contacts: 'For anything non-urgent, log a maintenance request or a complaint so there is a written record, and check Notices for updates from management. For a genuine emergency, use the SOS button at the top of the screen.',
   access: 'Gate code changes monthly — check Notices. Sign in at the office before entering any unit.',
 };
 
-const SECTION_KEYS = Object.keys(DEFAULT_SECTIONS);
+function buildLeavingPropertyText(months) {
+  const safeMonths = Number.isInteger(months) && months > 0 ? months : 3;
+  return `${safeMonths} calendar months' written notice is required before moving out. A joint inspection is done before keys are handed back, and your deposit is refunded after that, less any damage beyond fair wear and tear.`;
+}
+
+const SECTION_KEYS = Object.keys(DEFAULT_SECTIONS).concat('leaving_property');
 
 function parseDistrictId(value) {
   const districtId = Number(value);
@@ -36,11 +40,18 @@ async function getDistrictInfo(req, res, next) {
     const district = await pool.query('SELECT id FROM districts WHERE id = $1', [districtId]);
     if (!district.rows[0]) return res.status(404).json({ error: 'District not found.' });
 
+    const noticePeriodResult = await pool.query(
+      'SELECT notice_period_months FROM app_settings WHERE id = 1'
+    );
+    const noticePeriodMonths = Number(noticePeriodResult.rows[0]?.notice_period_months);
     const { rows } = await pool.query(
       'SELECT section_key, body FROM district_info WHERE district_id = $1',
       [districtId]
     );
-    const sections = { ...DEFAULT_SECTIONS };
+    const sections = {
+      ...DEFAULT_SECTIONS,
+      leaving_property: buildLeavingPropertyText(noticePeriodMonths),
+    };
     for (const row of rows) sections[row.section_key] = row.body;
 
     res.json({ district_id: districtId, sections });

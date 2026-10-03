@@ -7,6 +7,6 @@ const { listUnits, getUnit, createUnit, getMyUnit } = require('../controllers/un
 router.post('/', auth, requireRole('owner', 'admin'), createUnit);
 router.get('/', auth, requireRole('owner', 'admin'), listUnits);
 router.get('/me', auth, requireRole('tenant'), getMyUnit);
-router.get('/:id', auth, requireRole('admin', 'tenant'), getUnit);
+router.get('/:id', auth, requireRole('owner', 'admin', 'property_manager', 'tenant'), getUnit);
 
 module.exports = router;
