@@ -6,6 +6,22 @@ function createTrackingCode() {
 	return `CMP-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
 }
 
+function parseId(raw) {
+	const id = Number(raw);
+	return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+function redact(row) {
+	if (row.is_anonymous) {
+		row.submitted_by = null;
+		row.submitted_by_name = null;
+		row.unit_id = null;
+		row.unit_number = null;
+		row.property_name = null;
+	}
+	return row;
+}
+
 async function createComplaint(req, res, next) {
 	try {
 		const { category, description, is_anonymous } = req.body;
@@ -73,24 +89,40 @@ async function listComplaints(req, res, next) {
 	try {
 		const params = [];
 		let districtFilter = '';
+		let statusFilter = '';
+
 		if (req.user.role !== 'owner') {
 			params.push(req.user.district_id);
 			districtFilter = 'WHERE c.district_id = $1';
+		}
+
+		const { status } = req.query;
+		if (status !== undefined && status !== null && status !== '') {
+			if (status !== 'open' && status !== 'resolved') {
+				return res.status(400).json({ error: 'Status must be "open" or "resolved".' });
+			}
+			const statusIndex = params.length + 1;
+			statusFilter = districtFilter ? ` AND c.status = $${statusIndex}` : `WHERE c.status = $${statusIndex}`;
+			params.push(status);
 		}
 
 		const { rows } = await pool.query(
 			`SELECT c.id, c.district_id, c.unit_id, c.is_anonymous, c.tracking_code,
 							c.category, c.description, c.status, c.created_at, c.resolved_at,
 							CASE WHEN c.is_anonymous THEN NULL ELSE c.submitted_by END AS submitted_by,
-							CASE WHEN c.is_anonymous THEN NULL ELSE u.name END AS submitted_by_name
+							CASE WHEN c.is_anonymous THEN NULL ELSE u.name END AS submitted_by_name,
+							CASE WHEN c.is_anonymous THEN NULL ELSE un.unit_number END AS unit_number,
+							CASE WHEN c.is_anonymous THEN NULL ELSE pr.name END AS property_name
 			 FROM complaints c
 			 LEFT JOIN users u ON u.id = c.submitted_by
-			 ${districtFilter}
-			 ORDER BY c.created_at DESC`,
+			 LEFT JOIN units un ON un.id = c.unit_id AND c.is_anonymous = false
+			 LEFT JOIN properties pr ON pr.id = un.property_id
+			 ${districtFilter}${statusFilter}
+			 ORDER BY (c.status = 'open') DESC, c.created_at DESC`,
 			params
 		);
 
-		res.json(rows);
+		res.json(rows.map(redact));
 	} catch (err) {
 		next(err);
 	}
@@ -112,4 +144,116 @@ async function getComplaintStatus(req, res, next) {
 	}
 }
 
-module.exports = { createComplaint, listComplaints, getComplaintStatus };
+async function getComplaint(req, res, next) {
+	try {
+		const id = parseId(req.params.id);
+		if (!id) return res.status(400).json({ error: 'Invalid id.' });
+
+		const { rows } = await pool.query(
+			`SELECT c.id, c.district_id, c.unit_id, c.is_anonymous, c.tracking_code,
+							c.category, c.description, c.status, c.created_at, c.resolved_at,
+							CASE WHEN c.is_anonymous THEN NULL ELSE c.submitted_by END AS submitted_by,
+							CASE WHEN c.is_anonymous THEN NULL ELSE u.name END AS submitted_by_name,
+							CASE WHEN c.is_anonymous THEN NULL ELSE un.unit_number END AS unit_number,
+							CASE WHEN c.is_anonymous THEN NULL ELSE pr.name END AS property_name
+			 FROM complaints c
+			 LEFT JOIN users u ON u.id = c.submitted_by
+			 LEFT JOIN units un ON un.id = c.unit_id AND c.is_anonymous = false
+			 LEFT JOIN properties pr ON pr.id = un.property_id
+			 WHERE c.id = $1`,
+			[id]
+		);
+		const complaint = rows[0];
+		if (!complaint) return res.status(404).json({ error: 'Complaint not found.' });
+
+		if (req.user.role !== 'owner' && complaint.district_id !== req.user.district_id) {
+			return res.status(403).json({ error: 'You can only view complaints in your district.' });
+		}
+
+		res.json(redact(complaint));
+	} catch (err) {
+		next(err);
+	}
+}
+
+async function resolveComplaint(req, res, next) {
+	try {
+		const id = parseId(req.params.id);
+		if (!id) return res.status(400).json({ error: 'Invalid id.' });
+
+		const { rows } = await pool.query(
+			`SELECT id, district_id, is_anonymous FROM complaints WHERE id = $1`,
+			[id]
+		);
+		const complaint = rows[0];
+		if (!complaint) return res.status(404).json({ error: 'Complaint not found.' });
+
+		if (req.user.role !== 'owner' && complaint.district_id !== req.user.district_id) {
+			return res.status(403).json({ error: 'You can only resolve complaints in your district.' });
+		}
+
+		const { rows: updated } = await pool.query(
+			`UPDATE complaints SET status = 'resolved', resolved_at = now()
+			 WHERE id = $1 AND status = 'open'
+			 RETURNING *`,
+			[id]
+		);
+		if (!updated[0]) return res.status(409).json({ error: 'This complaint is already resolved.' });
+
+		await writeAudit({
+			actorId: req.user.user_id,
+			actorRole: req.user.role,
+			districtId: complaint.district_id,
+			action: 'complaint.resolve',
+			entityType: 'complaint',
+			entityId: complaint.is_anonymous ? null : complaint.id,
+			metadata: {},
+		});
+
+		res.json(redact(updated[0]));
+	} catch (err) {
+		next(err);
+	}
+}
+
+async function reopenComplaint(req, res, next) {
+	try {
+		const id = parseId(req.params.id);
+		if (!id) return res.status(400).json({ error: 'Invalid id.' });
+
+		const { rows } = await pool.query(
+			`SELECT id, district_id, is_anonymous FROM complaints WHERE id = $1`,
+			[id]
+		);
+		const complaint = rows[0];
+		if (!complaint) return res.status(404).json({ error: 'Complaint not found.' });
+
+		if (req.user.role !== 'owner' && complaint.district_id !== req.user.district_id) {
+			return res.status(403).json({ error: 'You can only reopen complaints in your district.' });
+		}
+
+		const { rows: updated } = await pool.query(
+			`UPDATE complaints SET status = 'open', resolved_at = NULL
+			 WHERE id = $1 AND status = 'resolved'
+			 RETURNING *`,
+			[id]
+		);
+		if (!updated[0]) return res.status(409).json({ error: 'This complaint is already open.' });
+
+		await writeAudit({
+			actorId: req.user.user_id,
+			actorRole: req.user.role,
+			districtId: complaint.district_id,
+			action: 'complaint.reopen',
+			entityType: 'complaint',
+			entityId: complaint.is_anonymous ? null : complaint.id,
+			metadata: {},
+		});
+
+		res.json(redact(updated[0]));
+	} catch (err) {
+		next(err);
+	}
+}
+
+module.exports = { createComplaint, listComplaints, getComplaintStatus, getComplaint, resolveComplaint, reopenComplaint };
