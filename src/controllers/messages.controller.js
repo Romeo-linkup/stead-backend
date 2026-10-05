@@ -1,5 +1,6 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds } = require('../utils/scope');
 
 async function createMessage(req, res, next) {
 	try {
@@ -52,27 +53,28 @@ async function createMessage(req, res, next) {
 }
 
 async function listMessages(req, res, next) {
-	try {
-		const isAdmin = ['owner', 'admin', 'property_manager'].includes(req.user.role);
-		const { rows } = await pool.query(
-			`SELECT m.*, s.name AS sender_name, s.role AS sender_role
-			 FROM messages m
-			 JOIN users s ON s.id = m.sender_id
-			 WHERE s.district_id = $1
-				 AND (
-					 $3 = true
-					 OR m.sender_id = $2
-					 OR m.recipient_scope = $2::text
-					 OR m.recipient_scope = 'district_admin'
-				 )
-			 ORDER BY m.created_at ASC`,
-			[req.user.district_id, req.user.user_id, isAdmin]
-		);
+  try {
+    const isAdmin = ['owner', 'admin', 'property_manager'].includes(req.user.role);
+    const districtIds = await allowedDistrictIds(req);
+    const { rows } = await pool.query(
+      `SELECT m.*, s.name AS sender_name, s.role AS sender_role
+       FROM messages m
+       JOIN users s ON s.id = m.sender_id
+       WHERE s.district_id = ANY($1::int[])
+           AND (
+             $3 = true
+             OR m.sender_id = $2
+             OR m.recipient_scope = $2::text
+             OR m.recipient_scope = 'district_admin'
+           )
+       ORDER BY m.created_at ASC`,
+      [districtIds, req.user.user_id, isAdmin]
+    );
 
-		res.json(rows);
-	} catch (err) {
-		next(err);
-	}
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
 }
 
 module.exports = { listMessages, createMessage };

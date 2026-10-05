@@ -2,7 +2,12 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { validateDistrictName } = require('../utils/validators');
-const { allowedDistrictIds, orgId } = require('../utils/scope');
+const { allowedDistrictIds, assertDistrictAccess, orgId } = require('../utils/scope');
+
+function parseId(value) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
 
 async function listDistricts(req, res, next) {
   try {
@@ -56,28 +61,60 @@ async function createDistrict(req, res, next) {
   }
 }
 
-async function deleteDistrict(req, res, next) {
+async function updateDistrict(req, res, next) {
   try {
-    const districtId = parseInt(req.params.id, 10);
-    if (isNaN(districtId)) {
+    const districtId = parseId(req.params.id);
+    if (!districtId) {
       return res.status(400).json({ error: 'Invalid district ID' });
     }
 
-    // Check district belongs to org
+    const { name } = req.body;
+    const nameErr = validateDistrictName(name);
+    if (nameErr) return res.status(400).json({ error: nameErr });
+
+    await assertDistrictAccess(req, districtId);
+
+    const { rows } = await pool.query(
+      'UPDATE districts SET name = $1 WHERE id = $2 RETURNING *',
+      [name.trim(), districtId]
+    );
+    const district = rows[0];
+
+    await writeAudit({
+      actorId: req.user.user_id,
+      actorRole: req.user.role,
+      districtId: district.id,
+      organizationId: req.user.organization_id,
+      action: 'district.rename',
+      entityType: 'district',
+      entityId: district.id,
+      metadata: { name: district.name },
+    });
+
+    res.json(district);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function deleteDistrict(req, res, next) {
+  try {
+    const districtId = parseId(req.params.id);
+    if (!districtId) {
+      return res.status(400).json({ error: 'Invalid district ID' });
+    }
+
+    await assertDistrictAccess(req, districtId);
+
     const { rows: districtRows } = await pool.query(
       'SELECT * FROM districts WHERE id = $1',
       [districtId]
     );
-    if (!districtRows.length) {
-      return res.status(404).json({ error: 'District not found' });
-    }
     const district = districtRows[0];
-
-    if (district.organization_id !== req.user.organization_id) {
+    if (!district) {
       return res.status(404).json({ error: 'District not found' });
     }
 
-    // Check for dependencies before deleting
     const [properties, codes, users] = await Promise.all([
       pool.query('SELECT COUNT(*) FROM properties WHERE district_id = $1', [districtId]),
       pool.query('SELECT COUNT(*) FROM codes WHERE district_id = $1', [districtId]),
@@ -94,10 +131,8 @@ async function deleteDistrict(req, res, next) {
       });
     }
 
-    // Delete the district
     await pool.query('DELETE FROM districts WHERE id = $1', [districtId]);
 
-    // Write audit log
     await writeAudit({
       actorId: req.user.user_id,
       actorRole: req.user.role,
@@ -115,4 +150,4 @@ async function deleteDistrict(req, res, next) {
   }
 }
 
-module.exports = { listDistricts, createDistrict, deleteDistrict };
+module.exports = { listDistricts, createDistrict, updateDistrict, deleteDistrict };

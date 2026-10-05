@@ -122,13 +122,48 @@ async function registerName(req, res, next) {
       user = existing.rows[0];
       await pool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
     } else {
-      const inserted = await pool.query(
-        `INSERT INTO users (name, phone, role, district_id, code_id, organization_id, last_login_at)
-         VALUES ($1, $2, $3, $4, $5, $6, now())
-         RETURNING *`,
-        [name.trim(), phone || null, payload.role, payload.district_id, payload.code_id, payload.organization_id]
+      // Resolve the code's unit (if any) so a tenant can be linked to it.
+      const codeResult = await pool.query(
+        'SELECT id, unit_id FROM codes WHERE id = $1',
+        [payload.code_id]
       );
-      user = inserted.rows[0];
+      const code = codeResult.rows[0];
+      const codeUnitId = code && code.unit_id ? code.unit_id : null;
+
+      const client = await pool.connect();
+      let transactionStarted = false;
+      try {
+        await client.query('BEGIN');
+        transactionStarted = true;
+
+        const inserted = await client.query(
+          `INSERT INTO users (name, phone, role, district_id, code_id, organization_id, last_login_at)
+           VALUES ($1, $2, $3, $4, $5, $6, now())
+           RETURNING *`,
+          [name.trim(), phone || null, payload.role, payload.district_id, payload.code_id, payload.organization_id]
+        );
+        user = inserted.rows[0];
+
+        // Link the tenant to the code's unit when it has no tenant yet.
+        // If the unit already has a different tenant, create the user but
+        // do NOT overwrite tenant_user_id.
+        if (codeUnitId !== null) {
+          await client.query(
+            `UPDATE units
+             SET tenant_user_id = $1, updated_at = now()
+             WHERE id = $2 AND tenant_user_id IS NULL`,
+            [user.id, codeUnitId]
+          );
+        }
+
+        await client.query('COMMIT');
+        transactionStarted = false;
+      } catch (err) {
+        if (transactionStarted) await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
 
       await writeAudit({
         actorId: user.id,

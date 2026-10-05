@@ -3,6 +3,7 @@ const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { renderLeaseHtml } = require('../services/pdf.service');
 const { uploadImage } = require('../services/cloudinary.service');
+const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 
 const EDITABLE_FIELDS = [
   'lessor_name', 'lessor_id_number', 'lessee_name', 'lessee_id_number',
@@ -80,6 +81,10 @@ function assertScope(user, districtId) {
   if (user.role === 'owner') return true;
   return ['admin', 'property_manager'].includes(user.role)
     && districtId === user.district_id;
+}
+
+async function assertLeaseScope(req, districtId) {
+  await assertDistrictAccess(req, districtId);
 }
 
 function isRealDate(value) {
@@ -196,10 +201,18 @@ function validateLeaseFields(body, { partial, current = {} }) {
   return { values };
 }
 
-function responseForScope(res, user, districtId, message = 'You can only manage leases in your district.') {
-  if (assertScope(user, districtId)) return false;
-  res.status(403).json({ error: message });
-  return true;
+async function responseForScope(res, req, districtId, message = 'You can only manage leases in your district.') {
+  try {
+    await assertLeaseScope(req, districtId);
+    return false;
+  } catch (err) {
+    if (err.status === 404) {
+      res.status(404).json({ error: 'Not found.' });
+      return true;
+    }
+    res.status(err.status || 403).json({ error: message });
+    return true;
+  }
 }
 
 async function createLease(req, res, next) {
@@ -217,7 +230,7 @@ async function createLease(req, res, next) {
     );
     const unit = unitLookup.rows[0];
     if (!unit) return res.status(404).json({ error: 'Unit not found.' });
-    if (responseForScope(res, req.user, unit.district_id)) return;
+    if (await responseForScope(res, req, unit.district_id)) return;
 
     const existing = await pool.query(
       `SELECT id FROM leases WHERE unit_id = $1 AND status IN ('draft', 'sent', 'signed') LIMIT 1`,
@@ -301,10 +314,8 @@ async function getLease(req, res, next) {
     if (req.user.role === 'tenant' && lease.tenant_user_id !== req.user.user_id) {
       return res.status(403).json({ error: 'You can only view your own lease.' });
     }
-    if (req.user.role === 'admin' || req.user.role === 'property_manager') {
-      if (lease.district_id !== req.user.district_id) {
-        return res.status(403).json({ error: 'You can only view leases in your district.' });
-      }
+    if (req.user.role !== 'tenant') {
+      await assertDistrictAccess(req, lease.district_id);
     }
     // Render the lease HTML
     const html = renderLeaseHtml(lease);
@@ -352,7 +363,7 @@ async function sendLease(req, res, next) {
     if (!id) return res.status(400).json({ error: 'Invalid id.' });
     const lease = await loadLease(id);
     if (!lease) return res.status(404).json({ error: 'Lease not found.' });
-    if (responseForScope(res, req.user, lease.district_id, 'You can only send leases in your district.')) return;
+    if (await responseForScope(res, req, lease.district_id, 'You can only send leases in your district.')) return;
 
     // Only allow sending from draft status
     if (lease.status !== 'draft') {
@@ -506,9 +517,10 @@ async function listLeases(req, res, next) {
     if (req.user.role === 'tenant') {
       params.push(req.user.user_id);
       conditions.push(`u.tenant_user_id = $${params.length} AND l.status <> 'draft'`);
-    } else if (req.user.role === 'admin' || req.user.role === 'property_manager') {
-      params.push(req.user.district_id);
-      conditions.push(`p.district_id = $${params.length}`);
+    } else {
+      const districtIds = await allowedDistrictIds(req);
+      params.push(districtIds);
+      conditions.push(`p.district_id = ANY($${params.length}::int[])`);
     }
     let query = `
       SELECT l.*, u.tenant_user_id, p.district_id, u.unit_number, p.name AS property_name
@@ -532,7 +544,7 @@ async function updateLease(req, res, next) {
     if (!id) return res.status(400).json({ error: 'Invalid id.' });
     const lease = await loadLease(id);
     if (!lease) return res.status(404).json({ error: 'Lease not found.' });
-    if (responseForScope(res, req.user, lease.district_id)) return;
+    if (await responseForScope(res, req, lease.district_id)) return;
     if (lease.status !== 'draft' && lease.status !== 'sent') {
       return res.status(409).json({
         error: lease.status === 'signed'
@@ -637,7 +649,7 @@ async function deleteLease(req, res, next) {
     if (!id) return res.status(400).json({ error: 'Invalid id.' });
     const lease = await loadLease(id);
     if (!lease) return res.status(404).json({ error: 'Lease not found.' });
-    if (responseForScope(res, req.user, lease.district_id)) return;
+    if (await responseForScope(res, req, lease.district_id)) return;
     if (lease.status !== 'draft') return res.status(409).json({ error: 'Only draft leases can be deleted.' });
 
     const { rows } = await pool.query(
@@ -665,7 +677,7 @@ async function supersedeLease(req, res, next) {
     if (!id) return res.status(400).json({ error: 'Invalid id.' });
     const lease = await loadLease(id);
     if (!lease) return res.status(404).json({ error: 'Lease not found.' });
-    if (responseForScope(res, req.user, lease.district_id)) return;
+    if (await responseForScope(res, req, lease.district_id)) return;
     if (!['signed', 'expired'].includes(lease.status)) {
       return res.status(409).json({ error: 'Only a signed or expired lease can be renewed or amended.' });
     }
@@ -776,7 +788,7 @@ async function lessorSignLease(req, res, next) {
     if (!id) return res.status(400).json({ error: 'Invalid id.' });
     const lease = await loadLease(id);
     if (!lease) return res.status(404).json({ error: 'Lease not found.' });
-    if (responseForScope(res, req.user, lease.district_id)) return;
+    if (await responseForScope(res, req, lease.district_id)) return;
 
     const body = req.body || {};
     const hasSignatureData = Object.prototype.hasOwnProperty.call(body, 'signature_data_url');

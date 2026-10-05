@@ -1,5 +1,6 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds, orgId } = require('../utils/scope');
 
 const ACTIVE_STATUSES = ['submitted', 'acknowledged'];
 const MOVE_OUT_STATUSES = ['submitted', 'acknowledged', 'withdrawn'];
@@ -41,8 +42,11 @@ function todayUtc() {
   return makeUtcDate(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
 }
 
-async function getNoticePeriodMonths() {
-  const { rows } = await pool.query('SELECT notice_period_months FROM app_settings WHERE id = 1');
+async function getNoticePeriodMonths(req) {
+  const { rows } = await pool.query(
+    'SELECT notice_period_months FROM app_settings WHERE organization_id = $1',
+    [orgId(req)]
+  );
   return rows[0]?.notice_period_months || 3;
 }
 
@@ -72,7 +76,7 @@ async function submitMoveOutNotice(req, res, next) {
     const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
     if (reason.length > 500) return res.status(400).json({ error: 'Reason must be 500 characters or fewer.' });
 
-    const noticePeriodMonths = await getNoticePeriodMonths();
+    const noticePeriodMonths = await getNoticePeriodMonths(req);
     const earliestDate = earliestMoveOut(todayUtc(), noticePeriodMonths);
     const intendedDateText = formatDateOnly(intendedDate);
     if (intendedDateText < earliestDate) {
@@ -127,7 +131,7 @@ async function getMyMoveOutNotice(req, res, next) {
          LIMIT 1`,
         [req.user.user_id]
       ),
-      getNoticePeriodMonths(),
+      getNoticePeriodMonths(req),
     ]);
     res.json({ notice: rows[0] || null, notice_period_months: noticePeriodMonths });
   } catch (err) {
@@ -180,10 +184,7 @@ async function listMoveOutNotices(req, res, next) {
     if (status && !MOVE_OUT_STATUSES.includes(status)) {
       return res.status(400).json({ error: 'Invalid move-out notice status.' });
     }
-    const districtId = req.user.role === 'owner' ? null : parseId(req.user.district_id);
-    if (req.user.role !== 'owner' && !districtId) {
-      return res.status(400).json({ error: 'Your account is not linked to a district.' });
-    }
+    const districtIds = await allowedDistrictIds(req);
 
     const { rows } = await pool.query(
       `SELECT m.id, m.status, m.intended_move_out_date, m.reason, m.created_at,
@@ -193,10 +194,10 @@ async function listMoveOutNotices(req, res, next) {
        JOIN users u ON u.id = m.tenant_user_id
        JOIN units un ON un.id = m.unit_id
        JOIN properties p ON p.id = un.property_id
-       WHERE ($1::integer IS NULL OR m.district_id = $1)
+       WHERE m.district_id = ANY($1::int[])
          AND ($2::text IS NULL OR m.status = $2)
        ORDER BY m.created_at DESC, m.id DESC`,
-      [districtId, status]
+      [districtIds, status]
     );
     res.json(rows);
   } catch (err) {
@@ -208,16 +209,13 @@ async function acknowledgeMoveOutNotice(req, res, next) {
   try {
     const noticeId = parseId(req.params.id);
     if (!noticeId) return res.status(400).json({ error: 'Invalid move-out notice ID.' });
-    const districtId = req.user.role === 'owner' ? null : parseId(req.user.district_id);
-    if (req.user.role !== 'owner' && !districtId) {
-      return res.status(400).json({ error: 'Your account is not linked to a district.' });
-    }
+    const districtIds = await allowedDistrictIds(req);
 
     const { rows: foundRows } = await pool.query(
       `SELECT id, status, district_id, intended_move_out_date
        FROM move_out_notices
-       WHERE id = $1 AND ($2::integer IS NULL OR district_id = $2)`,
-      [noticeId, districtId]
+       WHERE id = $1 AND district_id = ANY($2::int[])`,
+      [noticeId, districtIds]
     );
     const existing = foundRows[0];
     if (!existing) return res.status(404).json({ error: 'Move-out notice not found.' });
@@ -229,9 +227,9 @@ async function acknowledgeMoveOutNotice(req, res, next) {
       `UPDATE move_out_notices
        SET status = 'acknowledged', acknowledged_by = $2, acknowledged_at = now()
        WHERE id = $1 AND status = 'submitted'
-         AND ($3::integer IS NULL OR district_id = $3)
+         AND district_id = ANY($3::int[])
        RETURNING id, status, intended_move_out_date, acknowledged_at`,
-      [noticeId, req.user.user_id, districtId]
+      [noticeId, req.user.user_id, districtIds]
     );
     if (!rows[0]) return res.status(409).json({ error: 'Only submitted move-out notices can be acknowledged.' });
 

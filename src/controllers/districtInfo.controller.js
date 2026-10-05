@@ -1,5 +1,6 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { assertDistrictAccess, orgId } = require('../utils/scope');
 
 const DEFAULT_SECTIONS = {
   building_rules: [
@@ -40,8 +41,11 @@ async function getDistrictInfo(req, res, next) {
     const district = await pool.query('SELECT id FROM districts WHERE id = $1', [districtId]);
     if (!district.rows[0]) return res.status(404).json({ error: 'District not found.' });
 
+    await assertDistrictAccess(req, districtId);
+
     const noticePeriodResult = await pool.query(
-      'SELECT notice_period_months FROM app_settings WHERE id = 1'
+      'SELECT notice_period_months FROM app_settings WHERE organization_id = $1',
+      [orgId(req)]
     );
     const noticePeriodMonths = Number(noticePeriodResult.rows[0]?.notice_period_months);
     const { rows } = await pool.query(
@@ -86,6 +90,8 @@ async function updateDistrictInfo(req, res, next) {
 
     const district = await pool.query('SELECT id FROM districts WHERE id = $1', [districtId]);
     if (!district.rows[0]) return res.status(404).json({ error: 'District not found.' });
+
+    await assertDistrictAccess(req, districtId);
 
     if (body === '') {
       await pool.query(

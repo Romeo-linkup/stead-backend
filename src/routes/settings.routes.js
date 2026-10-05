@@ -12,8 +12,8 @@ function requireAppSettingsMount(req, res, next) {
 
 // Any authenticated role can read the business name (it's shown to everyone).
 router.get('/', auth, getSettings);
-// Business name remains owner-only; notice period is owner/admin-only.
-router.patch('/', auth, requireRole('owner', 'admin', 'property_manager'), updateSettings);
-router.patch('/notice-period', auth, requireRole('owner', 'admin'), requireAppSettingsMount, updateNoticePeriod);
+// Business name and notice period are owner-only.
+router.patch('/', auth, requireRole('owner'), updateSettings);
+router.patch('/notice-period', auth, requireRole('owner'), requireAppSettingsMount, updateNoticePeriod);
 
 module.exports = router;
