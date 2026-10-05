@@ -1,5 +1,6 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 
 async function createEmergency(req, res, next) {
 	try {
@@ -42,13 +43,7 @@ async function createEmergency(req, res, next) {
 
 async function listEmergency(req, res, next) {
 	try {
-		const params = [];
-		let districtFilter = '';
-		if (req.user.role !== 'owner') {
-			params.push(req.user.district_id);
-			districtFilter = `WHERE p.district_id = $${params.length}`;
-		}
-
+		const districtIds = await allowedDistrictIds(req);
 		const { rows } = await pool.query(
 			`SELECT ea.*, u.unit_number, p.name AS property_name,
 							trigger_user.name AS triggered_by_name,
@@ -58,10 +53,10 @@ async function listEmergency(req, res, next) {
 			 JOIN properties p ON p.id = u.property_id
 			 LEFT JOIN users trigger_user ON trigger_user.id = ea.triggered_by
 			 LEFT JOIN users ack_user ON ack_user.id = ea.acknowledged_by
-			 ${districtFilter}
+			 WHERE p.district_id = ANY($1::int[])
 			 ORDER BY CASE WHEN ea.status = 'unacknowledged' THEN 0 ELSE 1 END,
 								ea.created_at DESC`,
-			params
+			[districtIds]
 		);
 
 		res.json(rows);
@@ -82,9 +77,22 @@ async function findAlertForAdmin(id, user) {
 	const alert = rows[0];
 
 	if (!alert) return { error: { status: 404, message: 'Emergency alert not found.' } };
-	if (user.role !== 'owner' && alert.district_id !== user.district_id) {
-		return { error: { status: 403, message: 'You do not have access to that emergency alert.' } };
+	
+	const error = new Error('Not found.');
+	error.status = 404;
+	
+	const targetId = Number(alert.district_id);
+	if (!Number.isInteger(targetId) || targetId < 1) throw error;
+	
+	// Use assertDistrictAccess helper
+	const dummyReq = { user, _districtIds: undefined };
+	try {
+		await assertDistrictAccess(dummyReq, alert.district_id);
+	} catch (e) {
+		if (e.status === 404) return { error: { status: 404, message: 'Emergency alert not found.' } };
+		throw e;
 	}
+	
 	return { alert };
 }
 
@@ -113,6 +121,7 @@ async function updateEmergencyStatus(req, res, next, status, action) {
 			actorId: req.user.user_id,
 			actorRole: req.user.role,
 			districtId: result.alert.district_id,
+			organizationId: req.user.organization_id,
 			action,
 			entityType: 'emergency_alert',
 			entityId: alertId,

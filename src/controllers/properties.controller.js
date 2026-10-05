@@ -1,23 +1,10 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 
 async function listProperties(req, res, next) {
   try {
-    if (req.user.role === 'owner') {
-      const { rows } = await pool.query(
-        `SELECT p.*, d.name AS district_name,
-          COUNT(DISTINCT u.id) AS unit_count,
-          pcs.score_percent AS current_score, pcs.created_at AS score_created_at
-         FROM properties p
-         JOIN districts d ON d.id = p.district_id
-         LEFT JOIN units u ON u.property_id = p.id
-         LEFT JOIN property_current_score pcs ON pcs.property_id = p.id
-         GROUP BY p.id, d.id, pcs.score_percent, pcs.created_at
-         ORDER BY p.created_at DESC`
-      );
-      return res.json(rows);
-    }
-
+    const districtIds = await allowedDistrictIds(req);
     const { rows } = await pool.query(
       `SELECT p.*, d.name AS district_name,
               COUNT(DISTINCT u.id) AS unit_count,
@@ -26,10 +13,10 @@ async function listProperties(req, res, next) {
        JOIN districts d ON d.id = p.district_id
        LEFT JOIN units u ON u.property_id = p.id
        LEFT JOIN property_current_score pcs ON pcs.property_id = p.id
-       WHERE p.district_id = $1
+       WHERE p.district_id = ANY($1::int[])
        GROUP BY p.id, d.id, pcs.score_percent, pcs.created_at
        ORDER BY p.created_at DESC`,
-      [req.user.district_id]
+      [districtIds]
     );
     res.json(rows);
   } catch (err) {
@@ -49,14 +36,7 @@ async function createProperty(req, res, next) {
       return res.status(400).json({ error: 'district_id is required.' });
     }
 
-    if (req.user.role !== 'owner' && targetDistrictId !== req.user.district_id) {
-      return res.status(403).json({ error: 'You can only create properties in your own district.' });
-    }
-
-    const districtCheck = await pool.query('SELECT id FROM districts WHERE id = $1', [targetDistrictId]);
-    if (!districtCheck.rows[0]) {
-      return res.status(404).json({ error: 'District not found.' });
-    }
+    await assertDistrictAccess(req, targetDistrictId);
 
     const { rows } = await pool.query(
       `INSERT INTO properties (district_id, name, address)
@@ -70,6 +50,7 @@ async function createProperty(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: property.district_id,
+      organizationId: req.user.organization_id,
       action: 'property.create',
       entityType: 'property',
       entityId: property.id,

@@ -28,22 +28,33 @@ async function auth(req, res, next) {
 
   try {
     const { rows } = await pool.query(
-      `SELECT u.id, u.role, u.district_id, c.active AS code_active
+      `SELECT u.id, u.role, u.district_id, u.organization_id, u.code_id, c.active AS code_active
        FROM users u
-       JOIN codes c ON c.id = u.code_id
+       LEFT JOIN codes c ON c.id = u.code_id
        WHERE u.id = $1`,
       [payload.user_id]
     );
 
     const row = rows[0];
-    if (!row || !row.code_active) {
+    if (!row) {
+      return res.status(401).json({ error: 'User not found.' });
+    }
+
+    // If user has a code_id, check that the code is still active
+    if (row.code_id !== null && !row.code_active) {
       return res.status(401).json({ error: 'Your access code has been revoked.' });
+    }
+
+    // If user has no organization_id, reject
+    if (row.organization_id === null) {
+      return res.status(403).json({ error: 'Your account is not linked to an organisation.' });
     }
 
     req.user = {
       user_id: row.id,
       role: row.role,
       district_id: row.district_id,
+      organization_id: row.organization_id,
     };
     next();
   } catch (err) {

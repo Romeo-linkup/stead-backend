@@ -1,5 +1,6 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 
 async function createEvaluation(req, res, next) {
 	try {
@@ -34,9 +35,7 @@ async function createEvaluation(req, res, next) {
 		const property = propertyResult.rows[0];
 		if (!property) return res.status(404).json({ error: 'Property not found.' });
 
-		if (req.user.role !== 'owner' && property.district_id !== req.user.district_id) {
-			return res.status(403).json({ error: 'You can only evaluate properties in your district.' });
-		}
+		await assertDistrictAccess(req, property.district_id);
 
 		const { rows } = await pool.query(
 			`INSERT INTO property_evaluations (property_id, evaluated_by, score_percent, notes)
@@ -50,6 +49,7 @@ async function createEvaluation(req, res, next) {
 			actorId: req.user.user_id,
 			actorRole: req.user.role,
 			districtId: property.district_id,
+			organizationId: req.user.organization_id,
 			action: 'evaluation.create',
 			entityType: 'property_evaluation',
 			entityId: evaluation.id,
@@ -64,20 +64,13 @@ async function createEvaluation(req, res, next) {
 
 async function getAverageScore(req, res, next) {
 	try {
-		const params = [];
-		let districtFilter = '';
-
-		if (req.user.role !== 'owner') {
-			params.push(req.user.district_id);
-			districtFilter = 'WHERE p.district_id = $1';
-		}
-
+		const districtIds = await allowedDistrictIds(req);
 		const { rows } = await pool.query(
 			`SELECT AVG(pe.score_percent) as average_score
 			 FROM property_evaluations pe
 			 JOIN properties p ON p.id = pe.property_id
-			 ${districtFilter}`,
-			params
+			 WHERE p.district_id = ANY($1::int[])`,
+			[districtIds]
 		);
 
 		const averageScore = rows[0]?.average_score || 0;
@@ -89,10 +82,7 @@ async function getAverageScore(req, res, next) {
 
 async function getEvaluationSummary(req, res, next) {
 	try {
-		const params = [];
-		const districtFilter = req.user.role === 'owner' ? '' : 'WHERE d.id = $1';
-		if (req.user.role !== 'owner') params.push(req.user.district_id);
-
+		const districtIds = await allowedDistrictIds(req);
 		const { rows } = await pool.query(
 			`SELECT d.id AS district_id, d.name AS district_name,
 			        COUNT(p.id)::int AS property_count,
@@ -101,10 +91,10 @@ async function getEvaluationSummary(req, res, next) {
 			 FROM districts d
 			 JOIN properties p ON p.district_id = d.id
 			 LEFT JOIN property_current_score s ON s.property_id = p.id
-			 ${districtFilter}
+			 WHERE d.id = ANY($1::int[])
 			 GROUP BY d.id, d.name
 			 ORDER BY d.name`,
-			params
+			[districtIds]
 		);
 
 		const districts = rows.map((row) => {

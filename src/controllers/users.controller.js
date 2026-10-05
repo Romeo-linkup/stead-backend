@@ -1,6 +1,7 @@
 // src/controllers/users.controller.js
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds } = require('../utils/scope');
 
 async function getProfile(req, res, next) {
   try {
@@ -83,9 +84,9 @@ async function listUsers(req, res, next) {
       return res.status(400).json({ error: "role must be 'service_provider'." });
     }
 
-    const clauses = ['u.role = $1'];
-    const values = ['service_provider'];
-    let i = 2;
+    const clauses = ['u.role = $1', 'u.organization_id = $2'];
+    const values = ['service_provider', req.user.organization_id];
+    let i = 3;
 
     // district_id is an owner-only convenience filter. For everyone else the
     // scope comes from the session, so a district admin cannot read another

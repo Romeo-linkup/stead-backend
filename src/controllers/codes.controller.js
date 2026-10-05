@@ -24,8 +24,11 @@ async function createCode(req, res, next) {
 
     let districtName = null;
     if (needsDistrict) {
-      const d = await pool.query('SELECT name FROM districts WHERE id = $1', [district_id]);
+      const d = await pool.query('SELECT name, organization_id FROM districts WHERE id = $1', [district_id]);
       if (!d.rows[0]) return res.status(404).json({ error: 'District not found.' });
+      if (d.rows[0].organization_id !== req.user.organization_id) {
+        return res.status(404).json({ error: 'District not found.' });
+      }
       districtName = d.rows[0].name;
     }
 
@@ -35,8 +38,8 @@ async function createCode(req, res, next) {
       code = generateCode(districtName, role);
       try {
         const result = await pool.query(
-          `INSERT INTO codes (code, role, district_id) VALUES ($1, $2, $3) RETURNING *`,
-          [code, role, needsDistrict ? district_id : null]
+          `INSERT INTO codes (code, role, district_id, organization_id, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+          [code, role, needsDistrict ? district_id : null, req.user.organization_id, req.user.user_id]
         );
         inserted = result.rows[0];
       } catch (err) {
@@ -49,6 +52,7 @@ async function createCode(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: needsDistrict ? Number(district_id) : null,
+      organizationId: req.user.organization_id,
       action: 'code.create',
       entityType: 'code',
       entityId: inserted.id,
@@ -64,12 +68,12 @@ async function createCode(req, res, next) {
 async function listCodes(req, res, next) {
   try {
     if (req.user.role === 'owner') {
-      const { rows } = await pool.query('SELECT * FROM codes ORDER BY created_at DESC');
+      const { rows } = await pool.query('SELECT * FROM codes WHERE organization_id = $1 ORDER BY created_at DESC', [req.user.organization_id]);
       return res.json(rows);
     }
     const { rows } = await pool.query(
-      'SELECT * FROM codes WHERE district_id = $1 ORDER BY created_at DESC',
-      [req.user.district_id]
+      'SELECT * FROM codes WHERE district_id = $1 AND organization_id = $2 ORDER BY created_at DESC',
+      [req.user.district_id, req.user.organization_id]
     );
     res.json(rows);
   } catch (err) {
@@ -84,7 +88,20 @@ async function revokeCode(req, res, next) {
     const code = rows[0];
     if (!code) return res.status(404).json({ error: 'Code not found.' });
 
+    // Get user's code_id
+    const userResult = await pool.query('SELECT code_id FROM users WHERE id = $1', [req.user.user_id]);
+    const userCodeId = userResult.rows[0]?.code_id;
+
+    // Prevent revoking the code you're signed in with
+    if (userCodeId === Number(id)) {
+      return res.status(409).json({ error: "You can't revoke the code you are signed in with." });
+    }
+
     if (req.user.role !== 'owner' && code.district_id !== req.user.district_id) {
+      return res.status(403).json({ error: 'You do not have access to that code.' });
+    }
+
+    if (code.organization_id !== req.user.organization_id) {
       return res.status(403).json({ error: 'You do not have access to that code.' });
     }
 
@@ -94,6 +111,7 @@ async function revokeCode(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: code.district_id,
+      organizationId: req.user.organization_id,
       action: 'code.revoke',
       entityType: 'code',
       entityId: code.id,

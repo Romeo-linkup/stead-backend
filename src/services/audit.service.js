@@ -9,6 +9,7 @@ const pool = require('../db/pool');
  * @param {number|null} entry.actorId
  * @param {string} entry.actorRole
  * @param {number|null} entry.districtId
+ * @param {number|null} entry.organizationId
  * @param {string} entry.action        e.g. 'district.create', 'code.revoke'
  * @param {string} [entry.entityType]  e.g. 'district', 'code'
  * @param {number} [entry.entityId]
@@ -20,6 +21,7 @@ async function writeAudit(entry) {
     actorId = null,
     actorRole,
     districtId = null,
+    organizationId = null,
     action,
     entityType = null,
     entityId = null,
@@ -28,9 +30,9 @@ async function writeAudit(entry) {
 
   try {
     await pool.query(
-      `INSERT INTO audit_log (actor_id, actor_role, district_id, action, entity_type, entity_id, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [actorId, actorRole, districtId, action, entityType, entityId, metadata]
+      `INSERT INTO audit_log (actor_id, actor_role, district_id, organization_id, action, entity_type, entity_id, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [actorId, actorRole, districtId, organizationId, action, entityType, entityId, metadata]
     );
   } catch (err) {
     // Audit logging must never take down the request it's logging.

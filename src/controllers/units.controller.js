@@ -1,24 +1,18 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 
 async function listUnits(req, res, next) {
   try {
-    const params = [];
-    let districtFilter = '';
-
-    if (req.user.role !== 'owner') {
-      params.push(req.user.district_id);
-      districtFilter = 'WHERE p.district_id = $1';
-    }
-
+    const districtIds = await allowedDistrictIds(req);
     const { rows } = await pool.query(
       `SELECT u.id, u.property_id, p.name AS property_name, u.unit_number,
               u.tenant_user_id, u.rent_amount
        FROM units u
        JOIN properties p ON p.id = u.property_id
-       ${districtFilter}
+       WHERE p.district_id = ANY($1::int[])
        ORDER BY p.name, u.unit_number`,
-      params
+      [districtIds]
     );
 
     res.json(rows);
@@ -57,9 +51,8 @@ async function createUnit(req, res, next) {
     if (!property) {
       return res.status(404).json({ error: 'Property not found.' });
     }
-    if (req.user.role !== 'owner' && property.district_id !== req.user.district_id) {
-      return res.status(403).json({ error: 'You can only create units in your own district.' });
-    }
+
+    await assertDistrictAccess(req, property.district_id);
 
     const tenantId = tenant_user_id === undefined || tenant_user_id === null || tenant_user_id === ''
       ? null
@@ -91,6 +84,7 @@ async function createUnit(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: property.district_id,
+      organizationId: req.user.organization_id,
       action: 'unit.create',
       entityType: 'unit',
       entityId: unit.id,
@@ -110,7 +104,10 @@ async function createUnit(req, res, next) {
 async function getUnit(req, res, next) {
   try {
     const { id } = req.params;
-    const { rows } = await pool.query('SELECT * FROM units WHERE id = $1', [id]);
+    const { rows } = await pool.query(
+      'SELECT u.*, p.district_id FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = $1',
+      [id]
+    );
     const unit = rows[0];
 
     if (!unit) {
@@ -129,19 +126,12 @@ async function getUnit(req, res, next) {
     }
 
     if (req.user.role === 'owner') {
+      await assertDistrictAccess(req, unit.district_id);
       return res.json(unit);
     }
 
     if (req.user.role === 'admin' || req.user.role === 'property_manager') {
-      const propertyResult = await pool.query(
-        'SELECT district_id FROM properties WHERE id = $1',
-        [unit.property_id]
-      );
-      const property = propertyResult.rows[0];
-
-      if (!property || property.district_id !== req.user.district_id) {
-        return res.status(403).json({ error: 'You do not have access to that unit.' });
-      }
+      await assertDistrictAccess(req, unit.district_id);
       return res.json(unit);
     }
 

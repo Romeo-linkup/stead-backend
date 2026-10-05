@@ -28,11 +28,12 @@ async function getNotices(req, res, next) {
               d.name AS district_name, n.created_at
        FROM notices n
        LEFT JOIN districts d ON d.id = n.district_id
-       WHERE ($1::boolean OR n.district_id = $2 OR n.district_id IS NULL)
-         AND ($3::text IS NULL OR n.audience = 'all' OR n.audience = $3)
+       WHERE n.organization_id = $1
+         AND ($2::boolean OR n.district_id = $3 OR n.district_id IS NULL)
+         AND ($4::text IS NULL OR n.audience = 'all' OR n.audience = $4)
        ORDER BY n.created_at DESC
        LIMIT 100`,
-      [isOwner && districtId === null, districtId, audience]
+      [req.user.organization_id, isOwner && districtId === null, districtId, audience]
     );
     res.json(rows);
   } catch (err) {
@@ -76,15 +77,15 @@ async function createNotice(req, res, next) {
     }
 
     if (districtId !== null) {
-      const district = await pool.query('SELECT id FROM districts WHERE id = $1', [districtId]);
+      const district = await pool.query('SELECT id FROM districts WHERE id = $1 AND organization_id = $2', [districtId, req.user.organization_id]);
       if (!district.rows[0]) return res.status(404).json({ error: 'District not found.' });
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO notices (district_id, audience, title, body, created_by)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO notices (district_id, audience, title, body, created_by, organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, title, body, audience, district_id, created_at`,
-      [districtId, audience, title, body, req.user.user_id]
+      [districtId, audience, title, body, req.user.user_id, req.user.organization_id]
     );
     const notice = rows[0];
 
@@ -92,6 +93,7 @@ async function createNotice(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId,
+      organizationId: req.user.organization_id,
       action: 'notice.create',
       entityType: 'notice',
       entityId: notice.id,
@@ -110,8 +112,8 @@ async function deleteNotice(req, res, next) {
     if (!noticeId) return res.status(400).json({ error: 'Invalid notice ID.' });
 
     const isOwner = req.user.role === 'owner';
-    const values = isOwner ? [noticeId] : [noticeId, req.user.district_id];
-    const scope = isOwner ? 'id = $1' : 'id = $1 AND district_id = $2';
+    const values = isOwner ? [noticeId, req.user.organization_id] : [noticeId, req.user.district_id, req.user.organization_id];
+    const scope = isOwner ? 'id = $1 AND organization_id = $2' : 'id = $1 AND district_id = $2 AND organization_id = $3';
     const { rows } = await pool.query(
       `DELETE FROM notices WHERE ${scope}
        RETURNING id, district_id, audience`,
@@ -124,6 +126,7 @@ async function deleteNotice(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: notice.district_id,
+      organizationId: req.user.organization_id,
       action: 'notice.delete',
       entityType: 'notice',
       entityId: notice.id,

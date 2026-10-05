@@ -1,5 +1,6 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 
 async function listPayments(req, res, next) {
   try {
@@ -15,19 +16,15 @@ async function listPayments(req, res, next) {
       return res.json(rows);
     }
 
-    if (req.user.role === 'owner') {
-      const { rows } = await pool.query('SELECT * FROM payments ORDER BY due_date DESC, created_at DESC');
-      return res.json(rows);
-    }
-
+    const districtIds = await allowedDistrictIds(req);
     const { rows } = await pool.query(
       `SELECT p.*
        FROM payments p
        JOIN units u ON u.id = p.unit_id
        JOIN properties pr ON pr.id = u.property_id
-       WHERE pr.district_id = $1
+       WHERE pr.district_id = ANY($1::int[])
        ORDER BY p.due_date DESC, p.created_at DESC`,
-      [req.user.district_id]
+      [districtIds]
     );
 
     res.json(rows);
@@ -53,9 +50,7 @@ async function markPaid(req, res, next) {
       return res.status(404).json({ error: 'Payment not found.' });
     }
 
-    if (payment.district_id !== req.user.district_id) {
-      return res.status(403).json({ error: 'You do not have access to that payment.' });
-    }
+    await assertDistrictAccess(req, payment.district_id);
 
     const updated = await pool.query(
       `UPDATE payments
@@ -69,6 +64,7 @@ async function markPaid(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: payment.district_id,
+      organizationId: req.user.organization_id,
       action: 'payment.mark_paid',
       entityType: 'payment',
       entityId: payment.id,
@@ -98,9 +94,7 @@ async function markOutstanding(req, res, next) {
       return res.status(404).json({ error: 'Payment not found.' });
     }
 
-    if (payment.district_id !== req.user.district_id) {
-      return res.status(403).json({ error: 'You do not have access to that payment.' });
-    }
+    await assertDistrictAccess(req, payment.district_id);
 
     const updated = await pool.query(
       `UPDATE payments
@@ -114,6 +108,7 @@ async function markOutstanding(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: payment.district_id,
+      organizationId: req.user.organization_id,
       action: 'payment.mark_outstanding',
       entityType: 'payment',
       entityId: payment.id,

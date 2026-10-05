@@ -1,6 +1,7 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { uploadImage } = require('../services/cloudinary.service');
+const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 
 // Every branch below returns the same shape: the maintenance row plus the
 // unit/property/district it belongs to and, when assigned, the provider's
@@ -36,19 +37,12 @@ async function listMaintenance(req, res, next) {
       return res.json(rows);
     }
 
-    if (req.user.role === 'owner') {
-      const { rows } = await pool.query(
-        `${MAINTENANCE_SELECT}
-         ORDER BY mr.created_at DESC`
-      );
-      return res.json(rows);
-    }
-
+    const districtIds = await allowedDistrictIds(req);
     const { rows } = await pool.query(
       `${MAINTENANCE_SELECT}
-       WHERE p.district_id = $1
+       WHERE p.district_id = ANY($1::int[])
        ORDER BY mr.created_at DESC`,
-      [req.user.district_id]
+      [districtIds]
     );
 
     res.json(rows);
@@ -145,11 +139,9 @@ async function assignMaintenance(req, res, next) {
     if (!request) {
       return res.status(404).json({ error: 'Maintenance request not found.' });
     }
-    // District check before anything else role-specific, so a district admin
-    // cannot probe the status of another district's requests.
-    if (req.user.role !== 'owner' && request.district_id !== req.user.district_id) {
-      return res.status(403).json({ error: 'You can only assign requests in your district.' });
-    }
+
+    await assertDistrictAccess(req, request.district_id);
+
     // Reassigning is allowed, but only while the task is still unclaimed —
     // the provider's accept is what moves it to 'pending'.
     if (request.status !== 'outstanding') {
@@ -189,6 +181,7 @@ async function assignMaintenance(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: request.district_id,
+      organizationId: req.user.organization_id,
       action: 'maintenance.assign',
       entityType: 'maintenance_request',
       entityId: requestId,
@@ -279,6 +272,7 @@ async function completeMaintenance(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: request.district_id,
+      organizationId: req.user.organization_id,
       action: 'maintenance.complete',
       entityType: 'maintenance_request',
       entityId: requestId,

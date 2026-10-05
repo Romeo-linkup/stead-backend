@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 
 function createTrackingCode() {
 	return `CMP-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
@@ -91,10 +92,9 @@ async function listComplaints(req, res, next) {
 		let districtFilter = '';
 		let statusFilter = '';
 
-		if (req.user.role !== 'owner') {
-			params.push(req.user.district_id);
-			districtFilter = 'WHERE c.district_id = $1';
-		}
+		const districtIds = await allowedDistrictIds(req);
+		params.push(districtIds);
+		districtFilter = 'WHERE c.district_id = ANY($1::int[])';
 
 		const { status } = req.query;
 		if (status !== undefined && status !== null && status !== '') {
@@ -166,9 +166,7 @@ async function getComplaint(req, res, next) {
 		const complaint = rows[0];
 		if (!complaint) return res.status(404).json({ error: 'Complaint not found.' });
 
-		if (req.user.role !== 'owner' && complaint.district_id !== req.user.district_id) {
-			return res.status(403).json({ error: 'You can only view complaints in your district.' });
-		}
+		await assertDistrictAccess(req, complaint.district_id);
 
 		res.json(redact(complaint));
 	} catch (err) {
@@ -188,9 +186,7 @@ async function resolveComplaint(req, res, next) {
 		const complaint = rows[0];
 		if (!complaint) return res.status(404).json({ error: 'Complaint not found.' });
 
-		if (req.user.role !== 'owner' && complaint.district_id !== req.user.district_id) {
-			return res.status(403).json({ error: 'You can only resolve complaints in your district.' });
-		}
+		await assertDistrictAccess(req, complaint.district_id);
 
 		const { rows: updated } = await pool.query(
 			`UPDATE complaints SET status = 'resolved', resolved_at = now()
@@ -204,6 +200,7 @@ async function resolveComplaint(req, res, next) {
 			actorId: req.user.user_id,
 			actorRole: req.user.role,
 			districtId: complaint.district_id,
+			organizationId: req.user.organization_id,
 			action: 'complaint.resolve',
 			entityType: 'complaint',
 			entityId: complaint.is_anonymous ? null : complaint.id,
@@ -228,9 +225,7 @@ async function reopenComplaint(req, res, next) {
 		const complaint = rows[0];
 		if (!complaint) return res.status(404).json({ error: 'Complaint not found.' });
 
-		if (req.user.role !== 'owner' && complaint.district_id !== req.user.district_id) {
-			return res.status(403).json({ error: 'You can only reopen complaints in your district.' });
-		}
+		await assertDistrictAccess(req, complaint.district_id);
 
 		const { rows: updated } = await pool.query(
 			`UPDATE complaints SET status = 'open', resolved_at = NULL
@@ -244,6 +239,7 @@ async function reopenComplaint(req, res, next) {
 			actorId: req.user.user_id,
 			actorRole: req.user.role,
 			districtId: complaint.district_id,
+			organizationId: req.user.organization_id,
 			action: 'complaint.reopen',
 			entityType: 'complaint',
 			entityId: complaint.is_anonymous ? null : complaint.id,

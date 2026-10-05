@@ -2,35 +2,23 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { validateDistrictName } = require('../utils/validators');
+const { allowedDistrictIds, orgId } = require('../utils/scope');
 
 async function listDistricts(req, res, next) {
   try {
-    // Owner sees all districts; admin/property_manager are scoped to
-    // their own via requireDistrictAccess on the route, but listing is
-    // still useful to them scoped to themselves — so filter here too.
-    if (req.user.role === 'owner') {
-      const { rows } = await pool.query(`
-        SELECT districts.*,
-               COUNT(DISTINCT properties.id) AS property_count,
-               COUNT(DISTINCT units.id) AS unit_count
-        FROM districts
-        LEFT JOIN properties ON properties.district_id = districts.id
-        LEFT JOIN units ON units.property_id = properties.id
-        GROUP BY districts.id
-        ORDER BY districts.name
-      `);
-      return res.json(rows);
-    }
-    const { rows } = await pool.query(`
-      SELECT districts.*,
-             COUNT(DISTINCT properties.id) AS property_count,
-             COUNT(DISTINCT units.id) AS unit_count
-      FROM districts
-      LEFT JOIN properties ON properties.district_id = districts.id
-      LEFT JOIN units ON units.property_id = properties.id
-      WHERE districts.id = $1
-      GROUP BY districts.id
-    `, [req.user.district_id]);
+    const districtIds = await allowedDistrictIds(req);
+    const { rows } = await pool.query(
+      `SELECT districts.*,
+              COUNT(DISTINCT properties.id) AS property_count,
+              COUNT(DISTINCT units.id) AS unit_count
+       FROM districts
+       LEFT JOIN properties ON properties.district_id = districts.id
+       LEFT JOIN units ON units.property_id = properties.id
+       WHERE districts.id = ANY($1::int[])
+       GROUP BY districts.id
+       ORDER BY districts.name`,
+      [districtIds]
+    );
     res.json(rows);
   } catch (err) {
     next(err);
@@ -43,9 +31,11 @@ async function createDistrict(req, res, next) {
     const nameErr = validateDistrictName(name);
     if (nameErr) return res.status(400).json({ error: nameErr });
 
+    const organizationId = orgId(req);
+
     const { rows } = await pool.query(
-      'INSERT INTO districts (name) VALUES ($1) RETURNING *',
-      [name.trim()]
+      'INSERT INTO districts (name, organization_id) VALUES ($1, $2) RETURNING *',
+      [name.trim(), organizationId]
     );
     const district = rows[0];
 
@@ -53,6 +43,7 @@ async function createDistrict(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: district.id,
+      organizationId,
       action: 'district.create',
       entityType: 'district',
       entityId: district.id,
@@ -72,6 +63,20 @@ async function deleteDistrict(req, res, next) {
       return res.status(400).json({ error: 'Invalid district ID' });
     }
 
+    // Check district belongs to org
+    const { rows: districtRows } = await pool.query(
+      'SELECT * FROM districts WHERE id = $1',
+      [districtId]
+    );
+    if (!districtRows.length) {
+      return res.status(404).json({ error: 'District not found' });
+    }
+    const district = districtRows[0];
+
+    if (district.organization_id !== req.user.organization_id) {
+      return res.status(404).json({ error: 'District not found' });
+    }
+
     // Check for dependencies before deleting
     const [properties, codes, users] = await Promise.all([
       pool.query('SELECT COUNT(*) FROM properties WHERE district_id = $1', [districtId]),
@@ -89,13 +94,6 @@ async function deleteDistrict(req, res, next) {
       });
     }
 
-    // Get district info for audit log before deleting
-    const { rows: districtRows } = await pool.query('SELECT * FROM districts WHERE id = $1', [districtId]);
-    if (!districtRows.length) {
-      return res.status(404).json({ error: 'District not found' });
-    }
-    const district = districtRows[0];
-
     // Delete the district
     await pool.query('DELETE FROM districts WHERE id = $1', [districtId]);
 
@@ -104,6 +102,7 @@ async function deleteDistrict(req, res, next) {
       actorId: req.user.user_id,
       actorRole: req.user.role,
       districtId: district.id,
+      organizationId: district.organization_id,
       action: 'district.delete',
       entityType: 'district',
       entityId: district.id,
