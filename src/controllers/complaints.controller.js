@@ -131,14 +131,27 @@ async function listComplaints(req, res, next) {
 async function getComplaintStatus(req, res, next) {
 	try {
 		const { rows } = await pool.query(
-			`SELECT tracking_code, category, description, status, created_at, resolved_at
-			 FROM complaints
-			 WHERE tracking_code = $1`,
+			`SELECT c.tracking_code, c.category, c.description, c.status, c.created_at, c.resolved_at, c.district_id
+			 FROM complaints c
+			 WHERE c.tracking_code = $1`,
 			[req.params.trackingCode]
 		);
 		const complaint = rows[0];
 		if (!complaint) return res.status(404).json({ error: 'Complaint not found.' });
-		res.json(complaint);
+
+		const allowed = await allowedDistrictIds(req);
+		if (!allowed.includes(complaint.district_id)) {
+			return res.status(404).json({ error: 'Complaint not found.' });
+		}
+
+		res.json({
+			tracking_code: complaint.tracking_code,
+			category: complaint.category,
+			description: complaint.description,
+			status: complaint.status,
+			created_at: complaint.created_at,
+			resolved_at: complaint.resolved_at,
+		});
 	} catch (err) {
 		next(err);
 	}

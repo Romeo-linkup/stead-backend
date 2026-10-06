@@ -140,6 +140,7 @@ async function listCodes(req, res, next) {
        LEFT JOIN units u ON u.id = c.unit_id
        LEFT JOIN properties p ON p.id = u.property_id
        WHERE c.district_id = $1 AND c.organization_id = $2
+         AND c.role IN ('tenant', 'service_provider')
        ORDER BY c.created_at DESC`,
       [req.user.district_id, req.user.organization_id]
     );

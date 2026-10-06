@@ -13,9 +13,9 @@ This document tracks the scoping of every route before and after organization is
 | GET | /districts | owner, admin, property_manager | owner: all districts; admin/PM: own district_id | owner: org's districts; admin/PM: own district_id if in org |
 | POST | /districts | owner | Creates district without org_id | Creates district with org_id = orgId(req) |
 | DELETE | /districts/:id | owner, admin | district_id check only | organization_id check + district_id check |
-| GET | /codes | owner, admin | owner: all codes; admin: own district_id | owner: org's codes; admin: own district_id if in org |
-| POST | /codes | owner, admin | district belongs to user's district | district belongs to user's org; saves org_id and created_by |
-| PATCH | /codes/:id/revoke | owner, admin | district_id check + self-revoke | org_id check + district_id check + self-revoke |
+| GET | /codes | owner, admin, property_manager | owner: all codes; admin: own district_id | owner: org's codes; admin/PM: own district_id if in org, filtered to tenant/service_provider roles only |
+| POST | /codes | owner, admin, property_manager | district belongs to user's district | district belongs to user's org; saves org_id and created_by |
+| PATCH | /codes/:id/revoke | owner, admin, property_manager | district_id check + self-revoke | org_id check + district_id check + self-revoke |
 | GET | /properties | owner, admin | owner: all properties; admin: own district_id | owner: org's properties; admin: own district_id if in org |
 | POST | /properties | owner, admin | district_id check (owner exempt) | district belongs to user's org (owner exempt to use any org district) |
 | GET | /units | owner, admin | owner: all units; admin: own district_id | owner: org's units; admin: own district_id if in org |
@@ -31,9 +31,9 @@ This document tracks the scoping of every route before and after organization is
 | PATCH | /leases/:id/send | owner, admin, property_manager | district_id check (owner exempt) | district belongs to user's org (owner exempt to use any org district) |
 | POST | /leases/:id/sign | tenant | tenant on unit check | tenant on unit check (already scoped) |
 | POST | /leases/:id/lessor-sign | owner, admin, property_manager | district_id check (owner exempt) | district belongs to user's org (owner exempt to use any org district) |
-| GET | /leases/signature/saved | owner, admin, property_manager | No scoping (lessor signature) | Needs org scoping |
-| PUT | /leases/signature/saved | owner, admin, property_manager | No scoping (lessor signature) | Needs org scoping |
-| DELETE | /leases/signature/saved | owner, admin, property_manager | No scoping (lessor signature) | Needs org scoping |
+| GET | /leases/signature/saved | owner, admin, property_manager | No scoping (lessor signature) | Keyed by req.user.user_id (per-user, implicitly org-scoped via auth) |
+| PUT | /leases/signature/saved | owner, admin, property_manager | No scoping (lessor signature) | Keyed by req.user.user_id (per-user, implicitly org-scoped via auth) |
+| DELETE | /leases/signature/saved | owner, admin, property_manager | No scoping (lessor signature) | Keyed by req.user.user_id (per-user, implicitly org-scoped via auth) |
 | GET | /invoices | owner, admin, property_manager, service_provider | owner: all invoices; admin/PM: own district_id; provider: own assignments | owner: org's invoices; admin/PM: own district_id if in org; provider: own assignments |
 | POST | /invoices | service_provider | district_id from task | district_id from task must be in org |
 | POST | /invoices/:id/receipts | service_provider | own invoice only | own invoice only (already scoped) |
@@ -51,7 +51,7 @@ This document tracks the scoping of every route before and after organization is
 | PATCH | /maintenance/:id/complete | service_provider | own assignment only | own assignment only (already scoped) |
 | GET | /complaints | owner, admin, property_manager | owner: all complaints; admin/PM: own district_id | owner: org's complaints; admin/PM: own district_id if in org |
 | POST | /complaints | tenant | own unit only | own unit only (already scoped) |
-| GET | /complaints/status/:trackingCode | tenant | Public tracking code | Public tracking code (deliberately unscoped) |
+| GET | /complaints/status/:trackingCode | tenant | Public tracking code | Public tracking code; district_id must be in caller's allowed districts (404 otherwise) |
 | GET | /complaints/:id | owner, admin, property_manager | district_id check (owner exempt) | district belongs to user's org (owner exempt to use any org district) |
 | PATCH | /complaints/:id/resolve | owner, admin, property_manager | district_id check (owner exempt) | district belongs to user's org (owner exempt to use any org district) |
 | PATCH | /complaints/:id/reopen | owner, admin, property_manager | district_id check (owner exempt) | district belongs to user's org (owner exempt to use any org district) |
@@ -81,3 +81,16 @@ This document tracks the scoping of every route before and after organization is
 | PATCH | /move-out-notices/:id/acknowledge | owner, admin, property_manager | district_id check (owner exempt) | district belongs to user's org (owner exempt to use any org district) |
 | GET | /messages | all | district_id only | district_id only (already scoped) |
 | POST | /messages | all | district_id only | district_id only (already scoped) |
+| PATCH | /properties/:id | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| DELETE | /properties/:id | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| PATCH | /units/:id | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| DELETE | /units/:id | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| POST | /units/bulk | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| GET | /assets | owner, admin, property_manager, tenant | Not in inventory | owner: org's units; admin/PM: own district_id if in org; tenant: own unit |
+| POST | /assets | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| PATCH | /assets/:id | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| DELETE | /assets/:id | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| POST | /assets/apply-template | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| POST | /assets/copy | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| POST | /payments/:id/receipts | tenant | Not in inventory | own payment only (tenant on unit check, already scoped) |
+| DELETE | /payments/:id/receipts/:receiptId | tenant | Not in inventory | own payment only (tenant on unit check, already scoped) |
