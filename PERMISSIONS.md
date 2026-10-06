@@ -92,6 +92,10 @@ organisation's districts.
 | POST /assets/copy | ✓ org | ✓ own district | ✓ own district | — | — |
 | GET /messages | ✓ org | ✓ own district | ✓ own district | ✓ own district | ✓ own district |
 | POST /messages | ✓ org | ✓ own district | ✓ own district | ✓ own district | ✓ own district |
+| GET /account/deletion-check | ✓ org | — | — | — | — |
+| DELETE /account | ✓ org | — | — | — | — |
+| GET /notifications/unsubscribe | ✓ public | — | — | — | — |
+| POST /notifications/test | ✓ org | — | — | — | — |
 
 Notes:
 - District POST/PATCH/DELETE are owner-only (property_manager and admin excluded).

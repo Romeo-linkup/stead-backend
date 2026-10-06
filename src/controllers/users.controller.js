@@ -3,11 +3,13 @@ const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { allowedDistrictIds } = require('../utils/scope');
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 async function getProfile(req, res, next) {
   try {
     const userId = req.user.user_id;
     const { rows } = await pool.query(
-      `SELECT id, name, phone, role, district_id, next_of_kin, service_specialty, created_at
+      `SELECT id, name, phone, email, email_notifications, role, district_id, next_of_kin, service_specialty, created_at
        FROM users WHERE id = $1`,
       [userId]
     );
@@ -21,11 +23,43 @@ async function getProfile(req, res, next) {
 async function updateProfile(req, res, next) {
   try {
     const userId = req.user.user_id;
-    const { name, phone, next_of_kin, service_specialty } = req.body;
+    const { name, phone, next_of_kin, service_specialty, email, email_notifications } = req.body;
+
+    const current = await pool.query('SELECT role, email FROM users WHERE id = $1', [userId]);
+    const currentUser = current.rows[0];
+    if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
     const updates = [];
     const values = [];
     let paramCount = 1;
+
+    if (email !== undefined) {
+      if (currentUser.role === 'owner') {
+        return res.status(400).json({ error: 'Your login email can\'t be changed here.' });
+      }
+      const trimmed = typeof email === 'string' ? email.trim().toLowerCase() : '';
+      if (trimmed === '') {
+        updates.push(`email = $${paramCount++}`);
+        values.push(null);
+      } else {
+        if (!EMAIL_REGEX.test(trimmed)) {
+          return res.status(400).json({ error: 'Invalid email format.' });
+        }
+        if (trimmed.length > 254) {
+          return res.status(400).json({ error: 'Email must be at most 254 characters.' });
+        }
+        updates.push(`email = $${paramCount++}`);
+        values.push(trimmed);
+      }
+    }
+
+    if (email_notifications !== undefined) {
+      if (typeof email_notifications !== 'boolean') {
+        return res.status(400).json({ error: 'email_notifications must be a boolean.' });
+      }
+      updates.push(`email_notifications = $${paramCount++}`);
+      values.push(email_notifications);
+    }
 
     if (name !== undefined) {
       updates.push(`name = $${paramCount++}`);

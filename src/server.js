@@ -23,6 +23,8 @@ const settingsRoutes = require('./routes/settings.routes');
 const districtInfoRoutes = require('./routes/districtInfo.routes');
 const noticesRoutes = require('./routes/notices.routes');
 const moveOutRoutes = require('./routes/moveOut.routes');
+const accountRoutes = require('./routes/account.routes');
+const notificationsRoutes = require('./routes/notifications.routes');
 
 const app = express();
 
@@ -52,6 +54,8 @@ app.use('/app-settings', settingsRoutes);
 app.use('/district-info', districtInfoRoutes);
 app.use('/notices', noticesRoutes);
 app.use('/move-out-notices', moveOutRoutes);
+app.use('/account', accountRoutes);
+app.use('/notifications', notificationsRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found.' }));
 app.use(errorHandler);

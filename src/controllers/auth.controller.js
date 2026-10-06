@@ -21,6 +21,8 @@ const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { validateName, validatePhone } = require('../utils/validators');
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 const FULL_TOKEN_EXPIRY = '90d';
 const PRE_TOKEN_EXPIRY = '10m';
 
@@ -109,11 +111,25 @@ async function registerName(req, res, next) {
       return res.status(401).json({ error: 'Wrong token type for this step.' });
     }
 
-    const { name, phone } = req.body;
+    const { name, phone, email } = req.body;
     const nameErr = validateName(name);
     if (nameErr) return res.status(400).json({ error: nameErr });
     const phoneErr = validatePhone(phone);
     if (phoneErr) return res.status(400).json({ error: phoneErr });
+
+    let emailValue = null;
+    if (email !== undefined) {
+      const trimmed = typeof email === 'string' ? email.trim().toLowerCase() : '';
+      if (trimmed !== '') {
+        if (!EMAIL_REGEX.test(trimmed)) {
+          return res.status(400).json({ error: 'Invalid email format.' });
+        }
+        if (trimmed.length > 254) {
+          return res.status(400).json({ error: 'Email must be at most 254 characters.' });
+        }
+        emailValue = trimmed;
+      }
+    }
 
     // Guard against a double-submit registering the same code twice.
     const existing = await pool.query('SELECT * FROM users WHERE code_id = $1', [payload.code_id]);
@@ -137,10 +153,10 @@ async function registerName(req, res, next) {
         transactionStarted = true;
 
         const inserted = await client.query(
-          `INSERT INTO users (name, phone, role, district_id, code_id, organization_id, last_login_at)
-           VALUES ($1, $2, $3, $4, $5, $6, now())
+          `INSERT INTO users (name, phone, email, role, district_id, code_id, organization_id, last_login_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, now())
            RETURNING *`,
-          [name.trim(), phone || null, payload.role, payload.district_id, payload.code_id, payload.organization_id]
+          [name.trim(), phone || null, emailValue, payload.role, payload.district_id, payload.code_id, payload.organization_id]
         );
         user = inserted.rows[0];
 
