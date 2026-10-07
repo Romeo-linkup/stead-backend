@@ -96,6 +96,12 @@ organisation's districts.
 | DELETE /account | ✓ org | — | — | — | — |
 | GET /notifications/unsubscribe | ✓ public | — | — | — | — |
 | POST /notifications/test | ✓ org | — | — | — | — |
+| GET /notifications/verify | ✓ public | — | — | — | — |
+| POST /notifications/send-verification | ✓ | ✓ | ✓ | ✓ | ✓ |
+| POST /auth/forgot-password | ✓ public | — | — | — | — |
+| POST /auth/reset-password | ✓ public | — | — | — | — |
+| GET /leases/:id/pdf | ✓ org | ✓ own district | ✓ own district | ✓ own lease | — |
+| POST /leases/:id/email-copy | ✓ org | ✓ own district | ✓ own district | ✓ own lease | — |
 
 Notes:
 - District POST/PATCH/DELETE are owner-only (property_manager and admin excluded).

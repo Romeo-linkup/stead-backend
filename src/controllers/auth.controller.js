@@ -17,9 +17,11 @@
 
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { validateName, validatePhone } = require('../utils/validators');
+const { sendVerificationEmail, sendDirect } = require('../services/notify.service');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -190,6 +192,10 @@ async function registerName(req, res, next) {
         entityId: user.id,
         metadata: { via_code_id: payload.code_id },
       });
+
+      if (emailValue) {
+        setImmediate(() => sendVerificationEmail(user.id).catch(() => {}));
+      }
     }
 
     const token = issueFullToken(user);
@@ -242,7 +248,7 @@ async function refresh(req, res, next) {
 
 async function getConfig(req, res, next) {
   try {
-    res.json({ signup_open: process.env.SIGNUP_ENABLED === 'true' });
+    res.json({ signup_open: process.env.SIGNUP_ENABLED === 'true', email_enabled: process.env.EMAIL_ENABLED === 'true' });
   } catch (err) {
     next(err);
   }
@@ -425,6 +431,8 @@ async function signup(req, res, next) {
 
       await client.query('COMMIT');
 
+      setImmediate(() => sendVerificationEmail(user.id).catch(() => {}));
+
       const token = issueFullToken(user);
       res.status(201).json({
         token,
@@ -524,4 +532,197 @@ async function loginPassword(req, res, next) {
   }
 }
 
-module.exports = { validateCode, registerName, refresh, getConfig, signup, loginPassword, signupRateLimit, loginRateLimit };
+const forgotPasswordRateLimit = require('express-rate-limit')({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Try again later.' },
+});
+
+const resetPasswordRateLimit = require('express-rate-limit')({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Try again later.' },
+});
+
+// In-memory limit: 3 password-reset emails per hour per email address.
+const FORGOT_WINDOW_MS = 60 * 60 * 1000;
+const FORGOT_MAX_PER_EMAIL = 3;
+
+const forgotPasswordAttempts = new Map(); // lowercased email -> [timestamps]
+
+function checkForgotPasswordLimit(emailLower) {
+  const now = Date.now();
+  const entries = (forgotPasswordAttempts.get(emailLower) || []).filter(ts => now - ts < FORGOT_WINDOW_MS);
+  if (entries.length >= FORGOT_MAX_PER_EMAIL) {
+    forgotPasswordAttempts.set(emailLower, entries);
+    return false;
+  }
+  entries.push(now);
+  forgotPasswordAttempts.set(emailLower, entries);
+  return true;
+}
+
+function cleanForgotPasswordAttempts() {
+  const now = Date.now();
+  for (const [email, entries] of forgotPasswordAttempts.entries()) {
+    const filtered = entries.filter(ts => now - ts < FORGOT_WINDOW_MS);
+    if (filtered.length === 0) {
+      forgotPasswordAttempts.delete(email);
+    } else {
+      forgotPasswordAttempts.set(email, filtered);
+    }
+  }
+}
+
+setInterval(cleanForgotPasswordAttempts, 5 * 60 * 1000); // Clean every 5 minutes
+
+async function forgotPassword(req, res, next) {
+  try {
+    const { email } = req.body || {};
+    if (typeof email !== 'string' || email.length > 254) {
+      return res.status(400).json({ error: 'Email is required and must be at most 254 characters.' });
+    }
+    const emailLower = email.trim().toLowerCase();
+
+    const allowed = checkForgotPasswordLimit(emailLower);
+
+    // Always the same response, whether or not the account exists (and
+    // whether or not the per-email limit was hit). All lookup work happens
+    // after responding so timing never leaks which emails exist.
+    res.json({ ok: true });
+
+    if (!allowed) return;
+
+    setImmediate(async () => {
+      try {
+        if (process.env.EMAIL_ENABLED !== 'true') return;
+
+        const { rows } = await pool.query(
+          `SELECT id, email FROM users WHERE lower(email) = lower($1) AND role = 'owner' AND password_hash IS NOT NULL`,
+          [emailLower]
+        );
+        const user = rows[0];
+        if (!user) return;
+
+        // Invalidate any older, unused reset tokens for this user.
+        await pool.query(
+          'UPDATE password_resets SET used_at = now() WHERE user_id = $1 AND used_at IS NULL',
+          [user.id]
+        );
+
+        const token = crypto.randomBytes(32).toString('hex');
+        const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+        await pool.query(
+          `INSERT INTO password_resets (user_id, token_hash, expires_at)
+           VALUES ($1, $2, now() + interval '1 hour')`,
+          [user.id, tokenHash]
+        );
+
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+        await sendDirect({
+          to: user.email,
+          subject: 'Reset your Stead password',
+          heading: 'Reset your Stead password',
+          lines: [
+            'We received a request to reset the password for your Stead owner account.',
+            'This reset link expires in 1 hour. If you did not ask for this email, you can safely ignore it.',
+          ],
+          ctaLabel: 'Choose a new password',
+          ctaUrl: `${frontendUrl}/#/reset-password?token=${token}`,
+          businessName: 'Stead',
+        });
+      } catch (err) {
+        // Swallow errors; never log the token, email or password
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function resetPassword(req, res, next) {
+  try {
+    const { token, password } = req.body || {};
+
+    // Validate the password exactly like signup.
+    if (typeof password !== 'string') {
+      return res.status(400).json({ error: 'Password is required.' });
+    }
+    const passwordBytes = Buffer.byteLength(password, 'utf8');
+    if (passwordBytes < 10 || passwordBytes > 72) {
+      return res.status(400).json({ error: 'Password must be between 10 and 72 bytes.' });
+    }
+    if (typeof token !== 'string' || token.length === 0) {
+      return res.status(400).json({ error: 'This reset link is invalid or has expired.' });
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const { rows } = await pool.query(
+      `SELECT pr.user_id, u.email
+       FROM password_resets pr
+       JOIN users u ON u.id = pr.user_id
+       WHERE pr.token_hash = $1 AND pr.used_at IS NULL AND pr.expires_at > now()`,
+      [tokenHash]
+    );
+    const reset = rows[0];
+    if (!reset) {
+      return res.status(400).json({ error: 'This reset link is invalid or has expired.' });
+    }
+
+    if (password === reset.email.toLowerCase()) {
+      return res.status(400).json({ error: 'Password cannot be the same as your email.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      await client.query(
+        'UPDATE users SET password_hash = $1, password_changed_at = now() WHERE id = $2',
+        [passwordHash, reset.user_id]
+      );
+
+      // Mark this token used, and invalidate every other unused token for the user.
+      await client.query(
+        'UPDATE password_resets SET used_at = now() WHERE user_id = $1 AND used_at IS NULL',
+        [reset.user_id]
+      );
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    // Clear the failed-login lockout for this email.
+    loginFailures.delete(reset.email.toLowerCase());
+
+    setImmediate(async () => {
+      try {
+        await sendDirect({
+          to: reset.email,
+          subject: 'Your Stead password was changed',
+          heading: 'Your Stead password was changed',
+          lines: ['If this wasn\'t you, reset it again straight away.'],
+          businessName: 'Stead',
+        });
+      } catch (err) {
+        // Swallow errors; never log the token, email or password
+      }
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { validateCode, registerName, refresh, getConfig, signup, loginPassword, signupRateLimit, loginRateLimit, forgotPassword, resetPassword, forgotPasswordRateLimit, resetPasswordRateLimit };

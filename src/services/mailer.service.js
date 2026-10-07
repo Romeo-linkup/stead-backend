@@ -24,11 +24,26 @@ async function fetchWithTimeout(url, options, timeoutMs = 8000) {
   }
 }
 
-async function sendMail({ to, subject, text, html }) {
+async function sendMail({ to, subject, text, html, attachments }) {
   if (process.env.EMAIL_ENABLED !== 'true') {
     console.log('[mailer] email skipped');
     return { ok: false };
   }
+
+  const MAX_ATTACHMENT_CHARS = 5000000;
+  let sendAttachments = null;
+  let attachmentsDropped = false;
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    const totalChars = attachments.reduce((sum, a) => sum + String(a.contentBase64 || '').length, 0);
+    if (totalChars > MAX_ATTACHMENT_CHARS) {
+      console.log('[mailer] attachment too large, sent without');
+      attachmentsDropped = true;
+    } else {
+      sendAttachments = attachments;
+    }
+  }
+
+  const finish = (ok) => (attachmentsDropped ? { ok, attachmentsDropped: true } : { ok });
 
   const provider = process.env.EMAIL_PROVIDER || 'resend';
 
@@ -38,7 +53,7 @@ async function sendMail({ to, subject, text, html }) {
 
     if (!apiKey) {
       console.log('[mailer] resend: missing RESEND_API_KEY');
-      return { ok: false };
+      return finish(false);
     }
 
     let lastErr;
@@ -56,6 +71,9 @@ async function sendMail({ to, subject, text, html }) {
             subject,
             html,
             text,
+            ...(sendAttachments
+              ? { attachments: sendAttachments.map((a) => ({ filename: a.filename, content: a.contentBase64 })) }
+              : {}),
           }),
         });
         const status = res.status;
@@ -66,16 +84,16 @@ async function sendMail({ to, subject, text, html }) {
         }
         if (status >= 400) {
           console.log(`[mailer] resend: ${status}`);
-          return { ok: false };
+          return finish(false);
         }
         console.log('[mailer] resend: ok');
-        return { ok: true };
+        return finish(true);
       } catch (err) {
         lastErr = err;
         console.log(`[mailer] resend: network error`);
       }
     }
-    return { ok: false };
+    return finish(false);
   }
 
   if (provider === 'brevo') {
@@ -85,7 +103,7 @@ async function sendMail({ to, subject, text, html }) {
 
     if (!apiKey) {
       console.log('[mailer] brevo: missing BREVO_API_KEY');
-      return { ok: false };
+      return finish(false);
     }
 
     let lastErr;
@@ -104,6 +122,9 @@ async function sendMail({ to, subject, text, html }) {
             subject,
             htmlContent: html,
             textContent: text,
+            ...(sendAttachments
+              ? { attachment: sendAttachments.map((a) => ({ name: a.filename, content: a.contentBase64 })) }
+              : {}),
           }),
         });
         const status = res.status;
@@ -114,20 +135,20 @@ async function sendMail({ to, subject, text, html }) {
         }
         if (status >= 400) {
           console.log(`[mailer] brevo: ${status}`);
-          return { ok: false };
+          return finish(false);
         }
         console.log('[mailer] brevo: ok');
-        return { ok: true };
+        return finish(true);
       } catch (err) {
         lastErr = err;
         console.log(`[mailer] brevo: network error`);
       }
     }
-    return { ok: false };
+    return finish(false);
   }
 
   console.log(`[mailer] unknown provider: ${provider}`);
-  return { ok: false };
+  return finish(false);
 }
 
 module.exports = { sendMail };

@@ -2,6 +2,8 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { renderLeaseHtml } = require('../services/pdf.service');
+const { buildLeasePdf } = require('../services/leasePdf.service');
+const { sendDirect, recipientsFor } = require('../services/notify.service');
 const { uploadImage } = require('../services/cloudinary.service');
 const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 
@@ -357,6 +359,150 @@ async function getMyLease(req, res, next) {
   }
 }
 
+function sanitiseFilenamePart(value) {
+  return String(value == null ? '' : value)
+    .replace(/[^A-Za-z0-9_]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function leasePdfFilename(lease) {
+  const property = sanitiseFilenamePart(lease.property_name) || 'property';
+  const unit = sanitiseFilenamePart(lease.unit_number) || 'unit';
+  return `Lease-${property}-${unit}.pdf`;
+}
+
+async function loadBusinessName(organizationId) {
+  const { rows } = await pool.query(
+    'SELECT business_name FROM app_settings WHERE organization_id = $1',
+    [organizationId]
+  );
+  return rows[0]?.business_name || 'Stead';
+}
+
+function scopeLeaseForPdf(req, lease) {
+  if (req.user.role === 'tenant') {
+    // Tenants only reach a lease on their own unit.
+    if (lease.tenant_user_id !== req.user.user_id) {
+      const error = new Error('Lease not found.');
+      error.status = 404;
+      throw error;
+    }
+    return;
+  }
+  // Management: the lease's district must be in the caller's org.
+  return assertDistrictAccess(req, lease.district_id);
+}
+
+async function getLeasePdf(req, res, next) {
+  try {
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid id.' });
+    const lease = await loadLease(id);
+    if (!lease) return res.status(404).json({ error: 'Lease not found.' });
+
+    await scopeLeaseForPdf(req, lease);
+
+    const buffer = await buildLeasePdf(id, req.user.organization_id);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${leasePdfFilename(lease)}"`);
+    res.send(buffer);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+}
+
+async function emailLeaseCopy(req, res, next) {
+  try {
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid id.' });
+    const lease = await loadLease(id);
+    if (!lease) return res.status(404).json({ error: 'Lease not found.' });
+
+    await scopeLeaseForPdf(req, lease);
+
+    const { rows: tenantRows } = await pool.query(
+      'SELECT email, email_verified_at FROM users WHERE id = $1',
+      [lease.tenant_user_id]
+    );
+    const tenantUser = tenantRows[0];
+    if (!tenantUser?.email || !tenantUser.email_verified_at) {
+      return res.status(400).json({
+        error: req.user.role === 'tenant'
+          ? 'Add and confirm your email in My profile first.'
+          : 'The tenant has no confirmed email address.',
+      });
+    }
+
+    const buffer = await buildLeasePdf(id, req.user.organization_id);
+    const businessName = await loadBusinessName(req.user.organization_id);
+
+    await sendDirect({
+      to: tenantUser.email,
+      subject: 'Your lease PDF',
+      heading: 'Your lease',
+      lines: [`Your lease for ${lease.property_name}, unit ${lease.unit_number} is attached.`],
+      ctaLabel: 'Open Stead',
+      ctaUrl: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/#/tenant/lease`,
+      businessName,
+      attachments: [{ filename: leasePdfFilename(lease), contentBase64: buffer.toString('base64') }],
+    });
+
+    res.json({ sent: true });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+}
+
+// Counts only — never addresses, ids or lease details.
+let signedLeaseEmailFailures = 0;
+let leaseReadyEmailFailures = 0;
+
+async function sendSignedLeaseEmail(lease, organizationId) {
+  const { rows: tenantRows } = await pool.query(
+    'SELECT email, email_verified_at FROM users WHERE id = $1',
+    [lease.tenant_user_id]
+  );
+  const tenantUser = tenantRows[0];
+  if (!tenantUser?.email || !tenantUser.email_verified_at) return;
+
+  const buffer = await buildLeasePdf(lease.id, organizationId);
+  const businessName = await loadBusinessName(organizationId);
+
+  await sendDirect({
+    to: tenantUser.email,
+    subject: 'Your signed lease',
+    heading: 'Your signed lease',
+    lines: [
+      `Your signed lease for ${lease.property_name}, unit ${lease.unit_number} is attached.`,
+      'Keep this email for your records.',
+    ],
+    ctaLabel: 'Open Stead',
+    ctaUrl: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/#/tenant/lease`,
+    businessName,
+    attachments: [{ filename: leasePdfFilename(lease), contentBase64: buffer.toString('base64') }],
+  });
+}
+
+async function sendLeaseReadyEmail(lease, organizationId) {
+  if (!lease.tenant_user_id) return;
+  const businessName = await loadBusinessName(organizationId);
+  const recipients = await recipientsFor({ organizationId, userIds: [lease.tenant_user_id] });
+  for (const recipient of recipients) {
+    await sendDirect({
+      to: recipient.email,
+      subject: 'A lease is ready for your signature',
+      heading: 'A lease is ready for your signature',
+      lines: [`Your lease for ${lease.property_name}, unit ${lease.unit_number} is ready for your signature.`],
+      ctaLabel: 'Review and sign',
+      ctaUrl: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/#/tenant/lease`,
+      businessName,
+    });
+  }
+}
+
 async function sendLease(req, res, next) {
   try {
     const id = parseId(req.params.id);
@@ -392,6 +538,11 @@ async function sendLease(req, res, next) {
     });
 
     res.json(updatedLease);
+
+    setImmediate(() => sendLeaseReadyEmail(lease, req.user.organization_id).catch(() => {
+      leaseReadyEmailFailures += 1;
+      console.log(`[lease] lease-ready email failures: ${leaseReadyEmailFailures}`);
+    }));
   } catch (err) {
     next(err);
   }
@@ -498,6 +649,11 @@ async function signLease(req, res, next) {
     }
 
     res.json(updatedLease);
+
+    setImmediate(() => sendSignedLeaseEmail(lease, req.user.organization_id).catch(() => {
+      signedLeaseEmailFailures += 1;
+      console.log(`[lease] signed-lease email failures: ${signedLeaseEmailFailures}`);
+    }));
   } catch (err) {
     next(err);
   }
@@ -870,6 +1026,8 @@ module.exports = {
   createLease,
   getLease,
   getMyLease,
+  getLeasePdf,
+  emailLeaseCopy,
   sendLease,
   signLease,
   listLeases,

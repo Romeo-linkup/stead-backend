@@ -2,6 +2,7 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { allowedDistrictIds } = require('../utils/scope');
+const { sendVerificationEmail } = require('../services/notify.service');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -9,7 +10,8 @@ async function getProfile(req, res, next) {
   try {
     const userId = req.user.user_id;
     const { rows } = await pool.query(
-      `SELECT id, name, phone, email, email_notifications, role, district_id, next_of_kin, service_specialty, created_at
+      `SELECT id, name, phone, email, email_notifications, role, district_id, next_of_kin, service_specialty, created_at,
+       (email_verified_at IS NOT NULL) AS email_verified
        FROM users WHERE id = $1`,
       [userId]
     );
@@ -33,12 +35,14 @@ async function updateProfile(req, res, next) {
     const values = [];
     let paramCount = 1;
 
+    let emailChanged = false;
     if (email !== undefined) {
       if (currentUser.role === 'owner') {
         return res.status(400).json({ error: 'Your login email can\'t be changed here.' });
       }
       const trimmed = typeof email === 'string' ? email.trim().toLowerCase() : '';
       if (trimmed === '') {
+        emailChanged = currentUser.email !== null;
         updates.push(`email = $${paramCount++}`);
         values.push(null);
       } else {
@@ -48,8 +52,12 @@ async function updateProfile(req, res, next) {
         if (trimmed.length > 254) {
           return res.status(400).json({ error: 'Email must be at most 254 characters.' });
         }
+        emailChanged = currentUser.email !== trimmed;
         updates.push(`email = $${paramCount++}`);
         values.push(trimmed);
+      }
+      if (emailChanged) {
+        updates.push('email_verified_at = NULL');
       }
     }
 
@@ -102,6 +110,10 @@ async function updateProfile(req, res, next) {
     });
 
     res.json(user);
+
+    if (emailChanged) {
+      setImmediate(() => sendVerificationEmail(user.id).catch(() => {}));
+    }
   } catch (err) {
     next(err);
   }

@@ -98,3 +98,9 @@ This document tracks the scoping of every route before and after organization is
 | POST | /assets/copy | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
 | POST | /payments/:id/receipts | tenant | Not in inventory | own payment only (tenant on unit check, already scoped) |
 | DELETE | /payments/:id/receipts/:receiptId | tenant | Not in inventory | own payment only (tenant on unit check, already scoped) |
+| GET | /notifications/verify | public | Not in inventory | N/A |
+| POST | /notifications/send-verification | all | Not in inventory | Own user only (auth) |
+| POST | /auth/forgot-password | public | Not in inventory | N/A |
+| POST | /auth/reset-password | public | Not in inventory | N/A |
+| GET | /leases/:id/pdf | owner, admin, property_manager, tenant | Not in inventory | Management: assertDistrictAccess; tenant: own unit only |
+| POST | /leases/:id/email-copy | owner, admin, property_manager, tenant | Not in inventory | Management: assertDistrictAccess; tenant: own unit only |

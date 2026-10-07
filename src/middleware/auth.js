@@ -28,7 +28,7 @@ async function auth(req, res, next) {
 
   try {
     const { rows } = await pool.query(
-      `SELECT u.id, u.role, u.district_id, u.organization_id, u.code_id, c.active AS code_active
+      `SELECT u.id, u.role, u.district_id, u.organization_id, u.code_id, u.password_changed_at, c.active AS code_active
        FROM users u
        LEFT JOIN codes c ON c.id = u.code_id
        WHERE u.id = $1`,
@@ -38,6 +38,11 @@ async function auth(req, res, next) {
     const row = rows[0];
     if (!row) {
       return res.status(401).json({ error: 'User not found.' });
+    }
+
+    // If the password changed after this token was issued, sign out.
+    if (row.password_changed_at && payload.iat < Math.floor(row.password_changed_at / 1000)) {
+      return res.status(401).json({ error: 'Session expired. Please sign in again.' });
     }
 
     // If user has a code_id, check that the code is still active

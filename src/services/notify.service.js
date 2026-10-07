@@ -48,7 +48,7 @@ function escapeHtml(s) {
 async function recipientsFor({ organizationId, districtId, roles, userIds }) {
   if (!organizationId) return [];
 
-  const conditions = ['u.organization_id = $1', 'u.email IS NOT NULL', 'u.email_notifications = true'];
+  const conditions = ['u.organization_id = $1', 'u.email IS NOT NULL', 'u.email_verified_at IS NOT NULL', 'u.email_notifications = true'];
   const values = [organizationId];
   let i = 2;
 
@@ -87,13 +87,13 @@ async function recipientsFor({ organizationId, districtId, roles, userIds }) {
   return rows;
 }
 
-function renderEmail({ businessName, heading, lines, ctaLabel, ctaPath, unsubscribeUrl }) {
+function renderEmail({ businessName, heading, lines, ctaLabel, ctaPath, ctaUrl: ctaUrlArg, unsubscribeUrl }) {
   const escapedBusiness = escapeHtml(businessName);
   const escapedHeading = escapeHtml(heading);
   const escapedLines = lines.map(escapeHtml);
   const escapedCtaLabel = escapeHtml(ctaLabel);
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-  const ctaUrl = `${frontendUrl}/#${ctaPath}`;
+  const ctaUrl = ctaUrlArg || `${frontendUrl}/#${ctaPath}`;
 
   const html = `
 <!DOCTYPE html>
@@ -117,7 +117,7 @@ function renderEmail({ businessName, heading, lines, ctaLabel, ctaPath, unsubscr
             <td style="padding:24px;">
               <h1 style="margin:0 0 16px;font-size:18px;font-weight:600;color:#1C2321;">${escapedHeading}</h1>
               ${escapedLines.map(line => `<p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#1C2321;">${line}</p>`).join('')}
-              ${ctaLabel && ctaPath ? `
+              ${ctaLabel && (ctaPath || ctaUrlArg) ? `
                 <table role="presentation" cellspacing="0" cellpadding="0" style="margin:24px 0;">
                   <tr>
                     <td style="background:#A8823A;border-radius:4px;">
@@ -131,7 +131,7 @@ function renderEmail({ businessName, heading, lines, ctaLabel, ctaPath, unsubscr
           <tr>
             <td style="padding:0 24px 24px;border-top:1px solid #E5E2D8;">
               <p style="margin:0 0 8px;font-size:12px;color:#8A8D86;">You get these emails because you have an account on Stead.</p>
-              <p style="margin:0;font-size:12px;color:#8A8D86;"><a href="${unsubscribeUrl}" style="color:#A8823A;text-decoration:underline;">Unsubscribe</a></p>
+              ${unsubscribeUrl ? `<p style="margin:0;font-size:12px;color:#8A8D86;"><a href="${unsubscribeUrl}" style="color:#A8823A;text-decoration:underline;">Unsubscribe</a></p>` : ''}
             </td>
           </tr>
         </table>
@@ -150,7 +150,7 @@ function renderEmail({ businessName, heading, lines, ctaLabel, ctaPath, unsubscr
     ctaLabel ? `${escapedCtaLabel}: ${ctaUrl}` : '',
     '',
     'You get these emails because you have an account on Stead.',
-    `Unsubscribe: ${unsubscribeUrl}`,
+    ...(unsubscribeUrl ? [`Unsubscribe: ${unsubscribeUrl}`] : []),
   ].filter(Boolean).join('\n');
 
   return { html, text };
@@ -193,4 +193,47 @@ async function notifyUsers(recipients, { subject, heading, lines, ctaLabel, ctaP
   }
 }
 
-module.exports = { recipientsFor, renderEmail, notifyUsers, unsubscribeToken, buildUnsubscribeUrl };
+async function sendDirect({ to, subject, heading, lines, ctaLabel, ctaUrl, businessName, attachments }) {
+  try {
+    const { html, text } = renderEmail({ businessName, heading, lines, ctaLabel, ctaUrl });
+    return await sendMail({ to, subject, text, html, attachments });
+  } catch (err) {
+    // Swallow errors, never log addresses
+  }
+}
+
+async function sendVerificationEmail(userId) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.email, u.name, o.name AS organization
+       FROM users u
+       LEFT JOIN organizations o ON o.id = u.organization_id
+       WHERE u.id = $1`,
+      [userId]
+    );
+    const user = rows[0];
+    if (!user || !user.email) return;
+
+    const token = jwt.sign(
+      { user_id: userId, email: user.email, purpose: 'verify-email' },
+      process.env.JWT_SECRET,
+      { expiresIn: '48h' }
+    );
+    const base = process.env.BACKEND_PUBLIC_URL || 'http://localhost:4000';
+    const link = `${base}/notifications/verify?token=${token}`;
+
+    await sendDirect({
+      to: user.email,
+      subject: 'Confirm your email for Stead',
+      heading: 'Confirm your email',
+      lines: ['This email confirms that you want to receive updates from Stead.'],
+      ctaLabel: 'Confirm email',
+      ctaUrl: link,
+      businessName: user.organization || 'Stead',
+    });
+  } catch (err) {
+    // Swallow errors, never log addresses
+  }
+}
+
+module.exports = { recipientsFor, renderEmail, notifyUsers, unsubscribeToken, buildUnsubscribeUrl, sendDirect, sendVerificationEmail };
