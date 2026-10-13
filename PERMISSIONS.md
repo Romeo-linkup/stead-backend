@@ -103,6 +103,25 @@ organisation's districts.
 | GET /leases/:id/pdf | ✓ org | ✓ own district | ✓ own district | ✓ own lease | — |
 | POST /leases/:id/email-copy | ✓ org | ✓ own district | ✓ own district | ✓ own lease | — |
 
+## Platform routes (intentionally cross-organisation, platform admin only)
+
+These routes are authenticated with a separate JWT secret and are only accessible to platform admins. They are not organisation-scoped by design.
+
+| Route | platform_admin |
+|-------|----------------|
+| POST /platform/auth/login | ✓ |
+| GET /platform/overview | ✓ |
+| GET /platform/orgs | ✓ |
+| GET /platform/orgs/:id | ✓ |
+| POST /platform/orgs/:id/suspend | ✓ |
+| POST /platform/orgs/:id/unsuspend | ✓ |
+| POST /platform/orgs/:id/notes | ✓ |
+| POST /platform/orgs/:id/dispute-access | ✓ |
+| GET /platform/orgs/:id/audit | ✓ |
+| GET /platform/ledger | ✓ |
+| GET /platform/ledger/verify | ✓ |
+| GET /platform/ledger/export.csv | ✓ |
+
 Notes:
 - District POST/PATCH/DELETE are owner-only (property_manager and admin excluded).
 - Business name (PATCH /settings) and notice period (PATCH /settings/notice-period) are owner-only.

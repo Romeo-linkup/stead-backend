@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 
 const errorHandler = require('./middleware/errorHandler');
+const { requestContext } = require('./middleware/requestContext');
 const authRoutes = require('./routes/auth.routes');
 const districtsRoutes = require('./routes/districts.routes');
 const codesRoutes = require('./routes/codes.routes');
@@ -25,10 +26,13 @@ const noticesRoutes = require('./routes/notices.routes');
 const moveOutRoutes = require('./routes/moveOut.routes');
 const accountRoutes = require('./routes/account.routes');
 const notificationsRoutes = require('./routes/notifications.routes');
+const platformAuthRoutes = require('./routes/platformAuth.routes');
+const platformRoutes = require('./routes/platform.routes');
 
 const app = express();
 
 app.set('trust proxy', 1);
+app.use(requestContext);
 app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:3000" }));
 app.use(express.json());
 
@@ -56,6 +60,8 @@ app.use('/notices', noticesRoutes);
 app.use('/move-out-notices', moveOutRoutes);
 app.use('/account', accountRoutes);
 app.use('/notifications', notificationsRoutes);
+app.use('/platform/auth', platformAuthRoutes);
+app.use('/platform', platformRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found.' }));
 app.use(errorHandler);

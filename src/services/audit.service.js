@@ -3,6 +3,7 @@
 // Built in Phase 1 deliberately (per the blueprint) rather than bolted
 // on later.
 const pool = require('../db/pool');
+const { getContext } = require('../middleware/requestContext');
 
 /**
  * @param {object} entry
@@ -28,11 +29,15 @@ async function writeAudit(entry) {
     metadata = {},
   } = entry;
 
+  const ctx = getContext();
+  const ip = actorId !== null ? (ctx?.ip || null) : null;
+  const userAgent = actorId !== null ? (ctx?.userAgent || null) : null;
+
   try {
     await pool.query(
-      `INSERT INTO audit_log (actor_id, actor_role, district_id, organization_id, action, entity_type, entity_id, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [actorId, actorRole, districtId, organizationId, action, entityType, entityId, metadata]
+      `INSERT INTO audit_log (actor_id, actor_role, district_id, organization_id, action, entity_type, entity_id, metadata, ip, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [actorId, actorRole, districtId, organizationId, action, entityType, entityId, metadata, ip, userAgent]
     );
   } catch (err) {
     // Audit logging must never take down the request it's logging.

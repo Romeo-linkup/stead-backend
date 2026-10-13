@@ -104,3 +104,22 @@ This document tracks the scoping of every route before and after organization is
 | POST | /auth/reset-password | public | Not in inventory | N/A |
 | GET | /leases/:id/pdf | owner, admin, property_manager, tenant | Not in inventory | Management: assertDistrictAccess; tenant: own unit only |
 | POST | /leases/:id/email-copy | owner, admin, property_manager, tenant | Not in inventory | Management: assertDistrictAccess; tenant: own unit only |
+
+## Platform routes (intentionally cross-organisation, platform admin only)
+
+These routes are authenticated with a separate JWT secret and are only accessible to platform admins. They are not organisation-scoped by design.
+
+| Method | Path | Roles | Scoping |
+|--------|------|-------|---------|
+| POST | /platform/auth/login | platform_admin | No organisation scoping (platform-level authentication) |
+| GET | /platform/overview | platform_admin | Cross-organisation totals and counts |
+| GET | /platform/orgs | platform_admin | Cross-organisation, paginated org list |
+| GET | /platform/orgs/:id | platform_admin | Single org with district breakdown, notes, ledger |
+| POST | /platform/orgs/:id/suspend | platform_admin | Updates org status |
+| POST | /platform/orgs/:id/unsuspend | platform_admin | Updates org status |
+| POST | /platform/orgs/:id/notes | platform_admin | Adds org note |
+| POST | /platform/orgs/:id/dispute-access | platform_admin | Grants 24h audit access |
+| GET | /platform/orgs/:id/audit | platform_admin | Requires active dispute access grant |
+| GET | /platform/ledger | platform_admin | Cross-organisation ledger, paginated |
+| GET | /platform/ledger/verify | platform_admin | Verifies ledger hash chain |
+| GET | /platform/ledger/export.csv | platform_admin | Exports ledger to CSV |

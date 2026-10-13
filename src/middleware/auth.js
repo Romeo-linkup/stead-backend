@@ -28,9 +28,10 @@ async function auth(req, res, next) {
 
   try {
     const { rows } = await pool.query(
-      `SELECT u.id, u.role, u.district_id, u.organization_id, u.code_id, u.password_changed_at, c.active AS code_active
+      `SELECT u.id, u.role, u.district_id, u.organization_id, u.code_id, u.password_changed_at, c.active AS code_active, o.status AS organization_status
        FROM users u
        LEFT JOIN codes c ON c.id = u.code_id
+       LEFT JOIN organizations o ON o.id = u.organization_id
        WHERE u.id = $1`,
       [payload.user_id]
     );
@@ -53,6 +54,11 @@ async function auth(req, res, next) {
     // If user has no organization_id, reject
     if (row.organization_id === null) {
       return res.status(403).json({ error: 'Your account is not linked to an organisation.' });
+    }
+
+    // If organisation is suspended, reject
+    if (row.organization_status === 'suspended') {
+      return res.status(403).json({ error: 'This account is suspended. Please contact support.', code: 'ORG_SUSPENDED' });
     }
 
     req.user = {

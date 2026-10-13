@@ -20,6 +20,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { writeLedger } = require('../services/ledger.service');
 const { validateName, validatePhone } = require('../utils/validators');
 const { sendVerificationEmail, sendDirect } = require('../services/notify.service');
 
@@ -50,9 +51,10 @@ async function validateCode(req, res, next) {
     if (!raw) return res.status(400).json({ error: 'Code is required.' });
 
     const { rows } = await pool.query(
-      `SELECT c.id, c.code, c.role, c.district_id, c.active, c.organization_id, d.name AS district_name
+      `SELECT c.id, c.code, c.role, c.district_id, c.active, c.organization_id, d.name AS district_name, o.status AS organization_status
        FROM codes c
        LEFT JOIN districts d ON d.id = c.district_id
+       LEFT JOIN organizations o ON o.id = c.organization_id
        WHERE c.code = $1`,
       [raw]
     );
@@ -64,6 +66,10 @@ async function validateCode(req, res, next) {
 
     if (code.organization_id === null) {
       return res.status(403).json({ error: 'This code is not linked to an organisation.' });
+    }
+
+    if (code.organization_status === 'suspended') {
+      return res.status(403).json({ error: 'This account is suspended. Please contact support.', code: 'ORG_SUSPENDED' });
     }
 
     const existing = await pool.query('SELECT * FROM users WHERE code_id = $1', [code.id]);
@@ -135,6 +141,15 @@ async function registerName(req, res, next) {
 
     // Guard against a double-submit registering the same code twice.
     const existing = await pool.query('SELECT * FROM users WHERE code_id = $1', [payload.code_id]);
+
+    // Check organisation suspension
+    const orgResult = await pool.query(
+      'SELECT status FROM organizations WHERE id = $1',
+      [payload.organization_id]
+    );
+    if (orgResult.rows[0]?.status === 'suspended') {
+      return res.status(403).json({ error: 'This account is suspended. Please contact support.', code: 'ORG_SUSPENDED' });
+    }
     let user;
     if (existing.rows[0]) {
       user = existing.rows[0];
@@ -429,6 +444,24 @@ async function signup(req, res, next) {
         })]
       );
 
+      // Write ledger entry
+      try {
+        await writeLedger({
+          actorType: 'owner',
+          actorId: user.id,
+          organizationId,
+          organizationName: business_name.trim(),
+          eventType: 'org.signup',
+          detail: {
+            districts: districts.length,
+            properties: districts.reduce((sum, d) => sum + d.properties.length, 0),
+            units: totalUnits
+          }
+        }, client);
+      } catch (err) {
+        console.error('[ledger] failed to write ledger entry:', err.message);
+      }
+
       await client.query('COMMIT');
 
       setImmediate(() => sendVerificationEmail(user.id).catch(() => {}));
@@ -492,11 +525,24 @@ async function loginPassword(req, res, next) {
     // Check lockout
     const failure = loginFailures.get(emailLower);
     if (failure && failure.count >= 8 && now - failure.lastAttempt < 15 * 60 * 1000) {
+      try {
+        await writeLedger({
+          actorType: 'owner',
+          actorId: null,
+          eventType: 'owner.lockout',
+          detail: {}
+        });
+      } catch (err) {
+        console.error('[ledger] failed to write ledger entry:', err.message);
+      }
       return res.status(429).json({ error: 'Too many attempts. Try again later.' });
     }
 
     const { rows } = await pool.query(
-      'SELECT * FROM users WHERE lower(email) = lower($1) AND password_hash IS NOT NULL AND role = $2',
+      `SELECT u.*, o.status AS organization_status
+       FROM users u
+       LEFT JOIN organizations o ON o.id = u.organization_id
+       WHERE lower(u.email) = lower($1) AND u.password_hash IS NOT NULL AND u.role = $2`,
       [emailLower, 'owner']
     );
     const user = rows[0];
@@ -517,6 +563,10 @@ async function loginPassword(req, res, next) {
 
     // Clear failures on success
     loginFailures.delete(emailLower);
+
+    if (user.organization_status === 'suspended') {
+      return res.status(403).json({ error: 'This account is suspended. Please contact support.', code: 'ORG_SUSPENDED' });
+    }
 
     await pool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
 
@@ -693,6 +743,18 @@ async function resetPassword(req, res, next) {
         'UPDATE password_resets SET used_at = now() WHERE user_id = $1 AND used_at IS NULL',
         [reset.user_id]
       );
+
+      // Write ledger entry
+      try {
+        await writeLedger({
+          actorType: 'owner',
+          actorId: reset.user_id,
+          eventType: 'owner.password_reset',
+          detail: {}
+        }, client);
+      } catch (err) {
+        console.error('[ledger] failed to write ledger entry:', err.message);
+      }
 
       await client.query('COMMIT');
     } catch (err) {

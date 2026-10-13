@@ -37,7 +37,13 @@ async function main() {
 
     const dataTables = tables
       .map(t => t.table_name)
-      .filter(name => name !== 'schema_migrations'); // Exclude migrations tracking table
+      .filter(name => 
+        name !== 'schema_migrations' && // Exclude migrations tracking table
+        name !== 'platform_admins' && // Exclude platform admin accounts
+        name !== 'platform_ledger' && // Exclude immutable audit ledger
+        name !== 'org_notes' && // Exclude org notes
+        name !== 'dispute_access' // Exclude dispute access
+      );
 
     console.log('\nCurrent row counts:');
     for (const tableName of dataTables) {

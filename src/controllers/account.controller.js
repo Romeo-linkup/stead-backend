@@ -4,6 +4,7 @@ const pool = require('../db/pool');
 const { orgId } = require('../utils/scope');
 const { uploadReceipt: cloudinaryUploadReceipt, uploadImage: cloudinaryUploadImage } = require('../services/cloudinary.service');
 const cloudinary = require('cloudinary').v2;
+const { writeLedger } = require('../services/ledger.service');
 
 const DELETE_RATE_LIMIT = require('express-rate-limit')({
   windowMs: 60 * 60 * 1000,
@@ -190,6 +191,41 @@ async function deleteAccount(req, res, next) {
 
     await client.query('BEGIN');
     transactionStarted = true;
+
+    // Write ledger entry BEFORE deletion (same transaction)
+    try {
+      const orgNameResult = await client.query(
+        'SELECT name FROM organizations WHERE id = $1',
+        [organizationId]
+      );
+      const orgName = orgNameResult.rows[0]?.name || '';
+
+      const countsResult = await client.query(
+        `SELECT
+           (SELECT count(*) FROM districts WHERE organization_id = $1) AS districts,
+           (SELECT count(*) FROM properties p JOIN districts d ON d.id = p.district_id WHERE d.organization_id = $1) AS properties,
+           (SELECT count(*) FROM units u JOIN properties p ON p.id = u.property_id JOIN districts d ON d.id = p.district_id WHERE d.organization_id = $1) AS units,
+           (SELECT count(*) FROM users WHERE organization_id = $1) AS users`,
+        [organizationId]
+      );
+      const counts = countsResult.rows[0];
+
+      await writeLedger({
+        actorType: 'owner',
+        actorId: owner.id,
+        organizationId,
+        organizationName: orgName,
+        eventType: 'org.deleted',
+        detail: {
+          districts: counts.districts,
+          properties: counts.properties,
+          units: counts.units,
+          users: counts.users
+        }
+      }, client);
+    } catch (err) {
+      console.error('[ledger] failed to write ledger entry:', err.message);
+    }
 
     await client.query(
       `DELETE FROM unit_assets
