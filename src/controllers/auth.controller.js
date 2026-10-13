@@ -489,11 +489,13 @@ async function signup(req, res, next) {
       setImmediate(() => sendVerificationEmail(user.id).catch(() => {}));
 
       const token = issueFullToken(user);
+      res.status(201).json({
         token,
         role: user.role,
         district_id: user.district_id,
         name: user.name,
       });
+
     } catch (err) {
       await client.query('ROLLBACK');
       if (err.code === '23505') {
@@ -592,11 +594,13 @@ async function loginPassword(req, res, next) {
     await pool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
 
     const token = issueFullToken(user);
+    res.json({
       token,
       role: user.role,
       district_id: user.district_id,
       name: user.name,
     });
+    
   } catch (err) {
     next(err);
   }

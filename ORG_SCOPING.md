@@ -86,6 +86,9 @@ This document tracks the scoping of every route before and after organization is
 | DELETE | /account | owner | Not in inventory | orgId(req) |
 | GET | /notifications/unsubscribe | public | Not in inventory | N/A |
 | POST | /notifications/test | owner | Not in inventory | orgId(req) |
+| POST | /properties/:id/image | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| DELETE | /properties/:id/image | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
+| GET | /properties/mine | tenant, service_provider | Not in inventory | tenant: own unit's property; provider: properties in allowed districts |
 | PATCH | /properties/:id | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
 | DELETE | /properties/:id | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |
 | PATCH | /units/:id | owner, admin, property_manager | Not in inventory | district belongs to user's org (owner exempt to use any org district) |

@@ -83,6 +83,14 @@ async function collectCloudinaryPublicIds(client, organizationId) {
     if (match) publicIds.push(match[1]);
   }
 
+  const propertyResult = await client.query(
+    `SELECT image_public_id FROM properties p
+     JOIN districts d ON d.id = p.district_id
+     WHERE d.organization_id = $1 AND p.image_public_id IS NOT NULL`,
+    [organizationId]
+  );
+  for (const row of propertyResult.rows) publicIds.push(row.image_public_id);
+
   return [...new Set(publicIds)];
 }
 

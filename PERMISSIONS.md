@@ -18,8 +18,11 @@ may access multiple districts.
 | PATCH /codes/:id/districts | ✓ org | ✓ own admin codes | — | — | — |
 | GET /properties | ✓ org | ✓ own district | ✓ own district | — | — |
 | POST /properties | ✓ org | ✓ own district | ✓ own district | — | — |
+| POST /properties/:id/image | ✓ org | ✓ own district | ✓ own district | — | — |
+| DELETE /properties/:id/image | ✓ org | ✓ own district | ✓ own district | — | — |
 | PATCH /properties/:id | ✓ org | ✓ own district | ✓ own district | — | — |
 | DELETE /properties/:id | ✓ org | ✓ own district | ✓ own district | — | — |
+| GET /properties/mine | — | — | — | ✓ own property | ✓ allowed districts |
 | GET /units | ✓ org | ✓ own district | ✓ own district | — | — |
 | POST /units | ✓ org | ✓ own district | ✓ own district | — | — |
 | POST /units/bulk | ✓ org | ✓ own district | ✓ own district | — | — |

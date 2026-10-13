@@ -1,6 +1,9 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { allowedDistrictIds, assertDistrictAccess, resolveTargetDistrict } = require('../utils/scope');
+const { uploadReceipt: cloudinaryUploadReceipt } = require('../services/cloudinary.service');
+const cloudinary = require('cloudinary').v2;
+const { imageVariant } = require('../utils/imageUrl');
 
 const MANAGEMENT_ROLES = ['owner', 'admin', 'property_manager'];
 
@@ -25,7 +28,7 @@ async function listProperties(req, res, next) {
        ORDER BY p.created_at DESC`,
       [districtIds]
     );
-    res.json(rows);
+    res.json(enrichPropertyRows(rows));
   } catch (err) {
     next(err);
   }
@@ -209,4 +212,205 @@ async function deleteProperty(req, res, next) {
   }
 }
 
-module.exports = { listProperties, createProperty, updateProperty, deleteProperty };
+function validateImageBuffer(buffer) {
+  if (!buffer || buffer.length === 0) return false;
+  if (buffer.length > 5 * 1024 * 1024) return false;
+
+  // JPEG: FF D8 FF
+  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) return true;
+  // PNG: 89 50 4E 47
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) return true;
+  // WebP: RIFF....WEBP
+  if (
+    buffer.length >= 12 &&
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46 &&
+    buffer[8] === 0x57 &&
+    buffer[9] === 0x45 &&
+    buffer[10] === 0x42 &&
+    buffer[11] === 0x50
+  ) return true;
+
+  return false;
+}
+
+async function setPropertyImage(req, res, next) {
+  try {
+    const propertyId = parseId(req.params.id);
+    if (!propertyId) {
+      return res.status(400).json({ error: 'Invalid id.' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'Image file is required.' });
+    }
+
+    if (!validateImageBuffer(req.file.buffer)) {
+      return res.status(400).json({ error: 'Invalid image format. Only JPEG, PNG, and WebP are allowed.' });
+    }
+
+    const lookup = await pool.query(
+      `SELECT p.*, d.id AS district_id
+       FROM properties p
+       JOIN districts d ON d.id = p.district_id
+       WHERE p.id = $1`,
+      [propertyId]
+    );
+    const property = lookup.rows[0];
+    if (!property) {
+      return res.status(404).json({ error: 'Property not found.' });
+    }
+
+    await assertDistrictAccess(req, property.district_id);
+
+    const folder = `stead/properties/${req.user.organization_id}`;
+    const uploadResult = await cloudinaryUploadReceipt(req.file.buffer, folder);
+
+    const previousPublicId = property.image_public_id;
+    if (previousPublicId) {
+      try {
+        await cloudinary.uploader.destroy(previousPublicId);
+      } catch (err) {
+        console.error('[property image] failed to delete previous image:', err.message);
+      }
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE properties
+       SET image_url = $1, image_public_id = $2, image_updated_at = now()
+       WHERE id = $3
+       RETURNING *`,
+      [uploadResult.url, uploadResult.public_id, propertyId]
+    );
+    const updated = rows[0];
+
+    await writeAudit({
+      actorId: req.user.user_id,
+      actorRole: req.user.role,
+      districtId: property.district_id,
+      organizationId: req.user.organization_id,
+      action: 'property.image_set',
+      entityType: 'property',
+      entityId: property.id,
+      metadata: { property_id: property.id },
+    });
+
+    res.json({
+      image_url: imageVariant(updated.image_url, 'hero'),
+      thumb_url: imageVariant(updated.image_url, 'thumb'),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function deletePropertyImage(req, res, next) {
+  try {
+    const propertyId = parseId(req.params.id);
+    if (!propertyId) {
+      return res.status(400).json({ error: 'Invalid id.' });
+    }
+
+    const lookup = await pool.query(
+      `SELECT p.*, d.id AS district_id
+       FROM properties p
+       JOIN districts d ON d.id = p.district_id
+       WHERE p.id = $1`,
+      [propertyId]
+    );
+    const property = lookup.rows[0];
+    if (!property) {
+      return res.status(404).json({ error: 'Property not found.' });
+    }
+
+    await assertDistrictAccess(req, property.district_id);
+
+    const publicId = property.image_public_id;
+    if (publicId) {
+      try {
+        await cloudinary.uploader.destroy(publicId);
+      } catch (err) {
+        console.error('[property image] failed to delete image:', err.message);
+      }
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE properties
+       SET image_url = NULL, image_public_id = NULL, image_updated_at = NULL
+       WHERE id = $1
+       RETURNING *`,
+      [propertyId]
+    );
+
+    await writeAudit({
+      actorId: req.user.user_id,
+      actorRole: req.user.role,
+      districtId: property.district_id,
+      organizationId: req.user.organization_id,
+      action: 'property.image_remove',
+      entityType: 'property',
+      entityId: property.id,
+      metadata: { property_id: property.id },
+    });
+
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+function enrichPropertyRows(rows) {
+  return rows.map(row => ({
+    ...row,
+    image_thumb_url: imageVariant(row.image_url, 'thumb'),
+    image_url: imageVariant(row.image_url, 'hero'),
+  }));
+}
+
+async function getMyProperties(req, res, next) {
+  try {
+    let districtIds;
+    if (req.user.role === 'tenant') {
+      const { rows } = await pool.query(
+        `SELECT p.id, p.name, p.address, p.image_url, p.district_id
+         FROM units u
+         JOIN properties p ON p.id = u.property_id
+         WHERE u.tenant_user_id = $1`,
+        [req.user.user_id]
+      );
+      const property = rows[0];
+      if (!property) {
+        return res.json([]);
+      }
+      await assertDistrictAccess(req, property.district_id);
+      return res.json(enrichPropertyRows([{
+        id: property.id,
+        name: property.name,
+        address: property.address,
+        image_url: property.image_url,
+      }]));
+    }
+
+    if (req.user.role === 'service_provider') {
+      districtIds = await allowedDistrictIds(req);
+    } else {
+      return res.status(403).json({ error: 'Forbidden.' });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, name, address, image_url
+       FROM properties
+       WHERE district_id = ANY($1::int[])
+       ORDER BY name`,
+      [districtIds]
+    );
+
+    res.json(enrichPropertyRows(rows));
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listProperties, createProperty, updateProperty, deleteProperty, setPropertyImage, deletePropertyImage, enrichPropertyRows, getMyProperties };

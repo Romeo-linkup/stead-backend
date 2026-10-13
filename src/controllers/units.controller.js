@@ -1,6 +1,7 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
+const { imageVariant } = require('../utils/imageUrl');
 
 const UNIT_NUMBER_REGEX = /^[A-Za-z0-9][A-Za-z0-9 ._\/-]*$/;
 const MAX_BULK_UNITS = 500;
@@ -391,7 +392,7 @@ async function getUnit(req, res, next) {
 async function getMyUnit(req, res, next) {
   try {
     const { rows } = await pool.query(
-      `SELECT u.id, u.property_id, p.name AS property_name, u.unit_number,
+      `SELECT u.id, u.property_id, p.name AS property_name, p.address AS property_address, p.image_url AS property_image_url, u.unit_number,
               u.tenant_user_id, u.rent_amount, u.rent_due_day
        FROM units u
        JOIN properties p ON p.id = u.property_id
@@ -404,7 +405,10 @@ async function getMyUnit(req, res, next) {
       return res.status(404).json({ error: 'No unit assigned to you.' });
     }
 
-    res.json(unit);
+    res.json({
+      ...unit,
+      property_image_url: imageVariant(unit.property_image_url, 'hero'),
+    });
   } catch (err) {
     next(err);
   }

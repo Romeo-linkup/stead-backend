@@ -43,4 +43,13 @@ async function uploadReceipt(fileBuffer, folder) {
   });
 }
 
-module.exports = { uploadImage, uploadReceipt };
+async function deleteImage(publicId) {
+  if (!publicId) return;
+  try {
+    await cloudinary.uploader.destroy(publicId);
+  } catch (err) {
+    console.error('[cloudinary] delete failed:', err.message);
+  }
+}
+
+module.exports = { uploadImage, uploadReceipt, deleteImage };
