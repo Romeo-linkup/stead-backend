@@ -3,17 +3,19 @@
 Access per route and role. `owner`, `admin`, `property_manager`, `tenant`, `service_provider`.
 A dash (—) means the role cannot call the route. Scoping: non-owner roles are limited
 to their own district inside their organisation; the owner is limited to their
-organisation's districts.
+organisation's districts. Admins with `all_districts` or explicit `code_districts` rows
+may access multiple districts.
 
 | Route | owner | admin | property_manager | tenant | service_provider |
 |-------|-------|-------|------------------|--------|------------------|
-| GET /districts | ✓ org districts | ✓ own district | ✓ own district | — | — |
+| GET /districts | ✓ org districts | ✓ allowed districts | ✓ own district | — | — |
 | POST /districts | ✓ org | — | — | — | — |
 | PATCH /districts/:id (rename) | ✓ org | — | — | — | — |
 | DELETE /districts/:id | ✓ org | — | — | — | — |
-| GET /codes | ✓ org | ✓ own district (tenant/service_provider only) | ✓ own district (tenant/service_provider only) | — | — |
-| POST /codes | ✓ (admin/property_manager/service_provider/tenant) | ✓ (service_provider/tenant, own district) | ✓ (service_provider/tenant, own district) | — | — |
-| PATCH /codes/:id/revoke | ✓ org | ✓ own district (tenant/service_provider) | ✓ own district (tenant/service_provider) | — | — |
+| GET /codes | ✓ org | ✓ own district (tenant/service_provider only) + admin codes they created | ✓ own district (tenant/service_provider only) | — | — |
+| POST /codes | ✓ (admin/property_manager/service_provider/tenant) | ✓ (admin/service_provider/tenant, allowed districts) | ✓ (service_provider/tenant, own district) | — | — |
+| PATCH /codes/:id/revoke | ✓ org | ✓ own district (tenant/service_provider) + admin codes they created | ✓ own district (tenant/service_provider) | — | — |
+| PATCH /codes/:id/districts | ✓ org | ✓ own admin codes | — | — | — |
 | GET /properties | ✓ org | ✓ own district | ✓ own district | — | — |
 | POST /properties | ✓ org | ✓ own district | ✓ own district | — | — |
 | PATCH /properties/:id | ✓ org | ✓ own district | ✓ own district | — | — |
@@ -125,7 +127,9 @@ These routes are authenticated with a separate JWT secret and are only accessibl
 Notes:
 - District POST/PATCH/DELETE are owner-only (property_manager and admin excluded).
 - Business name (PATCH /settings) and notice period (PATCH /settings/notice-period) are owner-only.
-- Only the owner may create admin and property_manager codes; admin and property_manager may create only service_provider and tenant codes, in their own district.
+- Only the owner may create property_manager codes; owner and admin may create admin codes (owner org-wide; admin restricted to their allowed districts); admin may also create service_provider and tenant codes in their allowed districts; property_manager may create only service_provider and tenant codes, in their own district.
 - Tenant codes require unit_id and the unit must belong to the chosen district and organisation.
 - property_manager is excluded from GET /evaluations/average (that route stays owner/admin only).
-- Admin and property_manager cannot see admin, property_manager, or owner codes via GET /codes (only tenant and service_provider codes are visible to them).
+- Admin and property_manager cannot see admin, property_manager, or owner codes via GET /codes (only tenant and service_provider codes are visible to them), except admins see admin codes they created.
+- Admin codes support `all_districts` (access to all current and future districts in the organisation) or explicit `districts` array via `code_districts`.
+- PATCH /codes/:id/districts allows owner or the creating admin to update an admin code's district assignment.

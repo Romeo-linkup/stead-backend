@@ -1,6 +1,6 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
-const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
+const { allowedDistrictIds, assertDistrictAccess, resolveTargetDistrict } = require('../utils/scope');
 
 const MANAGEMENT_ROLES = ['owner', 'admin', 'property_manager'];
 
@@ -52,6 +52,8 @@ async function createProperty(req, res, next) {
       if (!targetDistrictId) {
         return res.status(400).json({ error: 'district_id is required.' });
       }
+    } else if (req.user.role === 'admin') {
+      targetDistrictId = await resolveTargetDistrict(req, req.body.district_id);
     } else {
       targetDistrictId = Number(req.user.district_id);
     }

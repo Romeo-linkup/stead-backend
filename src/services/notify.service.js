@@ -65,16 +65,60 @@ async function recipientsFor({ organizationId, districtId, roles, userIds }) {
   let roleFilter = '';
   if (roles && roles.length > 0) {
     const hasOwner = roles.includes('owner');
-    const otherRoles = roles.filter(r => r !== 'owner');
-    if (hasOwner && otherRoles.length === 0) {
-      roleFilter = ' AND u.role = $${i++}';
+    const hasAdmin = roles.includes('admin');
+    const otherRoles = roles.filter(r => r !== 'owner' && r !== 'admin');
+    
+    if (hasOwner && !hasAdmin && otherRoles.length === 0) {
+      roleFilter = ` AND u.role = $${i++}`;
       values.push('owner');
-    } else if (!hasOwner && otherRoles.length > 0) {
+    } else if (!hasOwner && !hasAdmin && otherRoles.length > 0) {
       roleFilter = ` AND u.role = ANY($${i++}::text[]) AND u.district_id = $${i++}`;
       values.push(otherRoles, districtId);
-    } else if (hasOwner && otherRoles.length > 0) {
+    } else if (hasOwner && !hasAdmin && otherRoles.length > 0) {
       roleFilter = ` AND ((u.role = $${i++}) OR (u.role = ANY($${i++}::text[]) AND u.district_id = $${i++}))`;
       values.push('owner', otherRoles, districtId);
+    } else if (!hasOwner && hasAdmin && otherRoles.length === 0) {
+      // Admin only: match when code has all_districts, or code_districts contains districtId, or (no code_districts rows and codes.district_id = districtId)
+      roleFilter = ` AND u.role = $${i++} AND (
+        c.all_districts = true
+        OR EXISTS (SELECT 1 FROM code_districts cd WHERE cd.code_id = c.id AND cd.district_id = $${i++})
+        OR (c.all_districts = false AND NOT EXISTS (SELECT 1 FROM code_districts cd WHERE cd.code_id = c.id) AND c.district_id = $${i++})
+      )`;
+      values.push('admin', districtId, districtId);
+    } else if (hasOwner && hasAdmin && otherRoles.length === 0) {
+      // Owner + Admin
+      roleFilter = ` AND (
+        u.role = $${i++}
+        OR (u.role = $${i++} AND (
+          c.all_districts = true
+          OR EXISTS (SELECT 1 FROM code_districts cd WHERE cd.code_id = c.id AND cd.district_id = $${i++})
+          OR (c.all_districts = false AND NOT EXISTS (SELECT 1 FROM code_districts cd WHERE cd.code_id = c.id) AND c.district_id = $${i++})
+        ))
+      )`;
+      values.push('owner', 'admin', districtId, districtId);
+    } else if (!hasOwner && hasAdmin && otherRoles.length > 0) {
+      // Admin + other roles
+      roleFilter = ` AND (
+        (u.role = $${i++} AND (
+          c.all_districts = true
+          OR EXISTS (SELECT 1 FROM code_districts cd WHERE cd.code_id = c.id AND cd.district_id = $${i++})
+          OR (c.all_districts = false AND NOT EXISTS (SELECT 1 FROM code_districts cd WHERE cd.code_id = c.id) AND c.district_id = $${i++})
+        ))
+        OR (u.role = ANY($${i++}::text[]) AND u.district_id = $${i++})
+      )`;
+      values.push('admin', districtId, districtId, otherRoles, districtId);
+    } else if (hasOwner && hasAdmin && otherRoles.length > 0) {
+      // Owner + Admin + other roles
+      roleFilter = ` AND (
+        u.role = $${i++}
+        OR (u.role = $${i++} AND (
+          c.all_districts = true
+          OR EXISTS (SELECT 1 FROM code_districts cd WHERE cd.code_id = c.id AND cd.district_id = $${i++})
+          OR (c.all_districts = false AND NOT EXISTS (SELECT 1 FROM code_districts cd WHERE cd.code_id = c.id) AND c.district_id = $${i++})
+        ))
+        OR (u.role = ANY($${i++}::text[]) AND u.district_id = $${i++})
+      )`;
+      values.push('owner', 'admin', districtId, districtId, otherRoles, districtId);
     }
   }
 

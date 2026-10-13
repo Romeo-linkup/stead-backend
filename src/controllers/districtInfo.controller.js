@@ -1,6 +1,6 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
-const { assertDistrictAccess, orgId } = require('../utils/scope');
+const { assertDistrictAccess, resolveTargetDistrict, orgId } = require('../utils/scope');
 
 const DEFAULT_SECTIONS = {
   building_rules: [
@@ -33,6 +33,8 @@ async function getDistrictInfo(req, res, next) {
     if (req.user.role === 'owner') {
       districtId = parseDistrictId(req.query.district_id);
       if (!districtId) return res.status(400).json({ error: 'district_id is required' });
+    } else if (req.user.role === 'admin') {
+      districtId = await resolveTargetDistrict(req, req.query.district_id);
     } else {
       districtId = parseDistrictId(req.user.district_id);
       if (!districtId) return res.status(400).json({ error: 'district_id is required' });
@@ -83,6 +85,8 @@ async function updateDistrictInfo(req, res, next) {
     if (req.user.role === 'owner') {
       districtId = parseDistrictId(req.body.district_id);
       if (!districtId) return res.status(400).json({ error: 'district_id is required' });
+    } else if (req.user.role === 'admin') {
+      districtId = await resolveTargetDistrict(req, req.body.district_id);
     } else {
       districtId = parseDistrictId(req.user.district_id);
       if (!districtId) return res.status(400).json({ error: 'district_id is required' });

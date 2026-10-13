@@ -79,12 +79,6 @@ async function loadLease(id) {
   return rows[0] || null;
 }
 
-function assertScope(user, districtId) {
-  if (user.role === 'owner') return true;
-  return ['admin', 'property_manager'].includes(user.role)
-    && districtId === user.district_id;
-}
-
 async function assertLeaseScope(req, districtId) {
   await assertDistrictAccess(req, districtId);
 }

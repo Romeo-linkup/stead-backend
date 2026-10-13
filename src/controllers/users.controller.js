@@ -11,7 +11,9 @@ async function getProfile(req, res, next) {
     const userId = req.user.user_id;
     const { rows } = await pool.query(
       `SELECT id, name, phone, email, email_notifications, role, district_id, next_of_kin, service_specialty, created_at,
-       (email_verified_at IS NOT NULL) AS email_verified
+       (email_verified_at IS NOT NULL) AS email_verified,
+       CASE WHEN role = 'admin' THEN all_districts ELSE false END AS all_districts,
+       CASE WHEN role = 'admin' THEN district_ids ELSE NULL END AS district_ids
        FROM users WHERE id = $1`,
       [userId]
     );
@@ -148,6 +150,12 @@ async function listUsers(req, res, next) {
       }
       clauses.push(`u.district_id = $${i++}`);
       values.push(ownerFilter);
+    } else if (req.user.role === 'admin') {
+      const dids = await allowedDistrictIds(req);
+      if (dids.length > 0) {
+        clauses.push(`u.district_id = ANY($${i++}::int[])`);
+        values.push(dids);
+      }
     } else if (req.user.role !== 'owner' && req.user.district_id) {
       clauses.push(`u.district_id = $${i++}`);
       values.push(req.user.district_id);

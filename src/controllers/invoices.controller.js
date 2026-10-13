@@ -1,6 +1,7 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { uploadImage } = require('../services/cloudinary.service');
+const { allowedDistrictIds } = require('../utils/scope');
 
 const MANAGEMENT_ROLES = ['owner', 'admin', 'property_manager'];
 const INVOICE_STATUSES = ['submitted', 'approved', 'rejected', 'paid'];
@@ -388,7 +389,11 @@ async function listInvoices(req, res, next) {
     if (req.user.role === 'service_provider') {
       params.push(req.user.user_id);
       conditions.push(`i.provider_user_id = $${params.length}`);
-    } else if (req.user.role === 'admin' || req.user.role === 'property_manager') {
+    } else if (req.user.role === 'admin') {
+      const dids = await allowedDistrictIds(req);
+      params.push(dids);
+      conditions.push(`i.district_id = ANY($${params.length}::int[])`);
+    } else if (req.user.role === 'property_manager') {
       params.push(req.user.district_id);
       conditions.push(`i.district_id = $${params.length}`);
     }
@@ -416,7 +421,7 @@ async function listInvoices(req, res, next) {
   }
 }
 
-async function loadManagedInvoice(invoiceId, user, res) {
+async function loadManagedInvoice(invoiceId, req, res) {
   const { rows } = await pool.query(
     `SELECT id, maintenance_request_id, district_id, status
      FROM invoices WHERE id = $1`,
@@ -427,9 +432,12 @@ async function loadManagedInvoice(invoiceId, user, res) {
     res.status(404).json({ error: 'Invoice not found.' });
     return null;
   }
-  if (user.role !== 'owner' && invoice.district_id !== user.district_id) {
-    res.status(403).json({ error: 'You can only manage invoices in your district.' });
-    return null;
+  if (req.user.role !== 'owner') {
+    const allowed = await allowedDistrictIds(req);
+    if (!allowed.includes(invoice.district_id)) {
+      res.status(403).json({ error: 'You can only manage invoices in your district.' });
+      return null;
+    }
   }
   return invoice;
 }
@@ -438,7 +446,7 @@ async function approveInvoice(req, res, next) {
   try {
     const invoiceId = parseId(req.params.id);
     if (!invoiceId) return res.status(400).json({ error: 'Invalid id.' });
-    const invoice = await loadManagedInvoice(invoiceId, req.user, res);
+    const invoice = await loadManagedInvoice(invoiceId, req, res);
     if (!invoice) return;
     const { rows } = await pool.query(
       `UPDATE invoices
@@ -467,7 +475,7 @@ async function rejectInvoice(req, res, next) {
   try {
     const invoiceId = parseId(req.params.id);
     if (!invoiceId) return res.status(400).json({ error: 'Invalid id.' });
-    const invoice = await loadManagedInvoice(invoiceId, req.user, res);
+    const invoice = await loadManagedInvoice(invoiceId, req, res);
     if (!invoice) return;
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
     if (!reason || reason.length > 300) {
@@ -501,7 +509,7 @@ async function markInvoicePaid(req, res, next) {
   try {
     const invoiceId = parseId(req.params.id);
     if (!invoiceId) return res.status(400).json({ error: 'Invalid id.' });
-    const invoice = await loadManagedInvoice(invoiceId, req.user, res);
+    const invoice = await loadManagedInvoice(invoiceId, req, res);
     if (!invoice) return;
     const { rows } = await pool.query(
       `UPDATE invoices

@@ -29,9 +29,17 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FULL_TOKEN_EXPIRY = '90d';
 const PRE_TOKEN_EXPIRY = '10m';
 
-function issueFullToken(user) {
+function issueFullToken(user, extra = {}) {
   return jwt.sign(
-    { type: 'full', user_id: user.id, role: user.role, district_id: user.district_id, organization_id: user.organization_id },
+    {
+      type: 'full',
+      user_id: user.id,
+      role: user.role,
+      district_id: user.district_id,
+      organization_id: user.organization_id,
+      all_districts: extra.all_districts ?? false,
+      district_ids: extra.district_ids ?? (user.district_id ? [user.district_id] : []),
+    },
     process.env.JWT_SECRET,
     { expiresIn: FULL_TOKEN_EXPIRY }
   );
@@ -51,11 +59,13 @@ async function validateCode(req, res, next) {
     if (!raw) return res.status(400).json({ error: 'Code is required.' });
 
     const { rows } = await pool.query(
-      `SELECT c.id, c.code, c.role, c.district_id, c.active, c.organization_id, d.name AS district_name, o.status AS organization_status
-       FROM codes c
-       LEFT JOIN districts d ON d.id = c.district_id
-       LEFT JOIN organizations o ON o.id = c.organization_id
-       WHERE c.code = $1`,
+      `SELECT c.id, c.code, c.role, c.district_id, c.active, c.organization_id, c.all_districts,
+              (SELECT array_agg(cd.district_id ORDER BY cd.district_id) FROM code_districts cd WHERE cd.code_id = c.id) AS code_district_ids,
+              d.name AS district_name, o.status AS organization_status
+        FROM codes c
+        LEFT JOIN districts d ON d.id = c.district_id
+        LEFT JOIN organizations o ON o.id = c.organization_id
+        WHERE c.code = $1`,
       [raw]
     );
     const code = rows[0];
@@ -77,7 +87,7 @@ async function validateCode(req, res, next) {
     if (existing.rows[0]) {
       const user = existing.rows[0];
       await pool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
-      const token = issueFullToken(user);
+      const token = issueFullToken(user, { all_districts: code.all_districts === true, district_ids: code.code_district_ids || [] });
       return res.json({
         needs_registration: false,
         token,
@@ -157,11 +167,21 @@ async function registerName(req, res, next) {
     } else {
       // Resolve the code's unit (if any) so a tenant can be linked to it.
       const codeResult = await pool.query(
-        'SELECT id, unit_id FROM codes WHERE id = $1',
+        'SELECT id, unit_id, all_districts FROM codes WHERE id = $1',
         [payload.code_id]
       );
       const code = codeResult.rows[0];
       const codeUnitId = code && code.unit_id ? code.unit_id : null;
+
+      // Fetch code_district_ids for admin scoping
+      let codeDistrictIds = [];
+      if (payload.role === 'admin') {
+        const cdResult = await pool.query(
+          'SELECT district_id FROM code_districts WHERE code_id = $1 ORDER BY district_id',
+          [payload.code_id]
+        );
+        codeDistrictIds = cdResult.rows.map((r) => r.district_id);
+      }
 
       const client = await pool.connect();
       let transactionStarted = false;
@@ -213,7 +233,7 @@ async function registerName(req, res, next) {
       }
     }
 
-    const token = issueFullToken(user);
+    const token = issueFullToken(user, { all_districts: code?.all_districts === true, district_ids: codeDistrictIds });
     res.status(201).json({
       token,
       role: user.role,
@@ -244,9 +264,11 @@ async function refresh(req, res, next) {
     }
 
     const { rows } = await pool.query(
-      `SELECT u.id, u.role, u.district_id, u.organization_id, c.active AS code_active
-       FROM users u JOIN codes c ON c.id = u.code_id
-       WHERE u.id = $1`,
+      `SELECT u.id, u.role, u.district_id, u.organization_id, c.active AS code_active,
+              c.all_districts,
+              (SELECT array_agg(cd.district_id ORDER BY cd.district_id) FROM code_districts cd WHERE cd.code_id = c.id) AS code_district_ids
+        FROM users u JOIN codes c ON c.id = u.code_id
+        WHERE u.id = $1`,
       [payload.user_id]
     );
     const row = rows[0];
@@ -254,7 +276,7 @@ async function refresh(req, res, next) {
       return res.status(401).json({ error: 'Your access code has been revoked.' });
     }
 
-    const newToken = issueFullToken(row);
+    const newToken = issueFullToken(row, { all_districts: row.all_districts === true, district_ids: row.code_district_ids || [] });
     res.json({ token: newToken });
   } catch (err) {
     next(err);
@@ -467,7 +489,6 @@ async function signup(req, res, next) {
       setImmediate(() => sendVerificationEmail(user.id).catch(() => {}));
 
       const token = issueFullToken(user);
-      res.status(201).json({
         token,
         role: user.role,
         district_id: user.district_id,
@@ -571,7 +592,6 @@ async function loginPassword(req, res, next) {
     await pool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
 
     const token = issueFullToken(user);
-    res.json({
       token,
       role: user.role,
       district_id: user.district_id,

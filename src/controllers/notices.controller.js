@@ -1,5 +1,6 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds, resolveTargetDistrict, canActOrgWide } = require('../utils/scope');
 
 const MANAGEMENT_ROLES = ['owner', 'admin', 'property_manager'];
 const AUDIENCES = ['all', 'tenants', 'providers'];
@@ -13,11 +14,14 @@ async function getNotices(req, res, next) {
   try {
     const isOwner = req.user.role === 'owner';
     const isManager = MANAGEMENT_ROLES.includes(req.user.role);
+    const orgWideCapable = isOwner || (req.user.role === 'admin' && canActOrgWide(req));
     let districtId = null;
-    if (isOwner && req.query.district_id != null && req.query.district_id !== '') {
+    if (orgWideCapable && req.query.district_id != null && req.query.district_id !== '') {
       districtId = parseId(req.query.district_id);
       if (!districtId) return res.status(400).json({ error: 'district_id must be a positive integer.' });
-    } else if (!isOwner) {
+    } else if (req.user.role === 'admin' && !orgWideCapable) {
+      districtId = await resolveTargetDistrict(req, req.query.district_id);
+    } else if (!orgWideCapable) {
       districtId = parseId(req.user.district_id);
       if (!districtId) return res.status(400).json({ error: 'Your account is not linked to a district.' });
     }
@@ -33,7 +37,7 @@ async function getNotices(req, res, next) {
          AND ($4::text IS NULL OR n.audience = 'all' OR n.audience = $4)
        ORDER BY n.created_at DESC
        LIMIT 100`,
-      [req.user.organization_id, isOwner && districtId === null, districtId, audience]
+      [req.user.organization_id, orgWideCapable && districtId === null, districtId, audience]
     );
     res.json(rows);
   } catch (err) {
@@ -66,11 +70,13 @@ async function createNotice(req, res, next) {
     }
 
     let districtId;
-    if (req.user.role === 'owner') {
+    if (req.user.role === 'owner' || (req.user.role === 'admin' && canActOrgWide(req))) {
       districtId = input.district_id == null ? null : parseId(input.district_id);
       if (input.district_id != null && !districtId) {
         return res.status(400).json({ error: 'district_id must be a positive integer or null.' });
       }
+    } else if (req.user.role === 'admin') {
+      districtId = await resolveTargetDistrict(req, input.district_id);
     } else {
       districtId = parseId(req.user.district_id);
       if (!districtId) return res.status(400).json({ error: 'Your account is not linked to a district.' });
@@ -112,8 +118,18 @@ async function deleteNotice(req, res, next) {
     if (!noticeId) return res.status(400).json({ error: 'Invalid notice ID.' });
 
     const isOwner = req.user.role === 'owner';
-    const values = isOwner ? [noticeId, req.user.organization_id] : [noticeId, req.user.district_id, req.user.organization_id];
-    const scope = isOwner ? 'id = $1 AND organization_id = $2' : 'id = $1 AND district_id = $2 AND organization_id = $3';
+    let values, scope;
+    if (isOwner) {
+      values = [noticeId, req.user.organization_id];
+      scope = 'id = $1 AND organization_id = $2';
+    } else if (req.user.role === 'admin') {
+      const districtIds = await allowedDistrictIds(req);
+      values = [noticeId, districtIds, req.user.organization_id];
+      scope = 'id = $1 AND district_id = ANY($2::int[]) AND organization_id = $3';
+    } else {
+      values = [noticeId, req.user.district_id, req.user.organization_id];
+      scope = 'id = $1 AND district_id = $2 AND organization_id = $3';
+    }
     const { rows } = await pool.query(
       `DELETE FROM notices WHERE ${scope}
        RETURNING id, district_id, audience`,

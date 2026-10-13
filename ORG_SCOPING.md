@@ -13,9 +13,10 @@ This document tracks the scoping of every route before and after organization is
 | GET | /districts | owner, admin, property_manager | owner: all districts; admin/PM: own district_id | owner: org's districts; admin/PM: own district_id if in org |
 | POST | /districts | owner | Creates district without org_id | Creates district with org_id = orgId(req) |
 | DELETE | /districts/:id | owner, admin | district_id check only | organization_id check + district_id check |
-| GET | /codes | owner, admin, property_manager | owner: all codes; admin: own district_id | owner: org's codes; admin/PM: own district_id if in org, filtered to tenant/service_provider roles only |
-| POST | /codes | owner, admin, property_manager | district belongs to user's district | district belongs to user's org; saves org_id and created_by |
+| GET | /codes | owner, admin, property_manager | owner: all codes; admin: own district_id | owner: org's codes; admin/PM: own district_id if in org, filtered to tenant/service_provider roles only + admins see admin codes they created |
+| POST | /codes | owner, admin, property_manager | district belongs to user's district | district belongs to user's org; saves org_id and created_by; admin codes support all_districts or districts array (owner/admin only) |
 | PATCH | /codes/:id/revoke | owner, admin, property_manager | district_id check + self-revoke | org_id check + district_id check + self-revoke |
+| PATCH | /codes/:id/districts | owner, admin | N/A | org_id check + admin codes only; owner may edit any in org; admin only their own; validates districts/all_districts in one transaction |
 | GET | /properties | owner, admin | owner: all properties; admin: own district_id | owner: org's properties; admin: own district_id if in org |
 | POST | /properties | owner, admin | district_id check (owner exempt) | district belongs to user's org (owner exempt to use any org district) |
 | GET | /units | owner, admin | owner: all units; admin: own district_id | owner: org's units; admin: own district_id if in org |

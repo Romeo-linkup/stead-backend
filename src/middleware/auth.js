@@ -28,7 +28,9 @@ async function auth(req, res, next) {
 
   try {
     const { rows } = await pool.query(
-      `SELECT u.id, u.role, u.district_id, u.organization_id, u.code_id, u.password_changed_at, c.active AS code_active, o.status AS organization_status
+      `SELECT u.id, u.role, u.district_id, u.organization_id, u.code_id, u.password_changed_at, c.active AS code_active, c.all_districts,
+              (SELECT array_agg(cd.district_id ORDER BY cd.district_id) FROM code_districts cd WHERE cd.code_id = c.id) AS code_district_ids,
+              o.status AS organization_status
        FROM users u
        LEFT JOIN codes c ON c.id = u.code_id
        LEFT JOIN organizations o ON o.id = u.organization_id
@@ -61,11 +63,39 @@ async function auth(req, res, next) {
       return res.status(403).json({ error: 'This account is suspended. Please contact support.', code: 'ORG_SUSPENDED' });
     }
 
+    // Determine district_ids based on role and code configuration
+    let allDistricts = false;
+    let districtIds = [];
+
+    if (row.role === 'admin' && row.code_id !== null) {
+      allDistricts = row.all_districts === true;
+      if (allDistricts) {
+        // Admin with all_districts: will be resolved live in scope.js
+        districtIds = [];
+      } else if (row.code_district_ids && row.code_district_ids.length > 0) {
+        // Admin with specific districts from code_districts
+        districtIds = row.code_district_ids;
+      } else {
+        // Legacy admin: no code_districts rows, use codes.district_id
+        districtIds = [row.district_id];
+      }
+    } else {
+      // All other roles: single district
+      districtIds = [row.district_id];
+    }
+
+    // If req.user.district_id is not in district_ids, adjust for this request
+    if (!districtIds.includes(row.district_id) && districtIds.length > 0) {
+      row.district_id = districtIds[0];
+    }
+
     req.user = {
       user_id: row.id,
       role: row.role,
       district_id: row.district_id,
       organization_id: row.organization_id,
+      all_districts: allDistricts,
+      district_ids: districtIds,
     };
     next();
   } catch (err) {
