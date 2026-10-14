@@ -160,29 +160,29 @@ async function registerName(req, res, next) {
     if (orgResult.rows[0]?.status === 'suspended') {
       return res.status(403).json({ error: 'This account is suspended. Please contact support.', code: 'ORG_SUSPENDED' });
     }
+
+    // Load the code once, for both branches (new user and double-submit).
+    const codeResult = await pool.query(
+      'SELECT id, unit_id, all_districts FROM codes WHERE id = $1',
+      [payload.code_id]
+    );
+    const code = codeResult.rows[0] || null;
+    const codeUnitId = code && code.unit_id ? code.unit_id : null;
+
+    let codeDistrictIds = [];
+    if (payload.role === 'admin') {
+      const cdResult = await pool.query(
+        'SELECT district_id FROM code_districts WHERE code_id = $1 ORDER BY district_id',
+        [payload.code_id]
+      );
+      codeDistrictIds = cdResult.rows.map((r) => r.district_id);
+    }
+
     let user;
     if (existing.rows[0]) {
       user = existing.rows[0];
       await pool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
     } else {
-      // Resolve the code's unit (if any) so a tenant can be linked to it.
-      const codeResult = await pool.query(
-        'SELECT id, unit_id, all_districts FROM codes WHERE id = $1',
-        [payload.code_id]
-      );
-      const code = codeResult.rows[0];
-      const codeUnitId = code && code.unit_id ? code.unit_id : null;
-
-      // Fetch code_district_ids for admin scoping
-      let codeDistrictIds = [];
-      if (payload.role === 'admin') {
-        const cdResult = await pool.query(
-          'SELECT district_id FROM code_districts WHERE code_id = $1 ORDER BY district_id',
-          [payload.code_id]
-        );
-        codeDistrictIds = cdResult.rows.map((r) => r.district_id);
-      }
-
       const client = await pool.connect();
       let transactionStarted = false;
       try {
@@ -449,9 +449,9 @@ async function signup(req, res, next) {
 
       // Create app_settings row
       await client.query(
-        `INSERT INTO app_settings (id, business_name, notice_period_months, organization_id)
-         VALUES (1, $1, 3, $2)
-         ON CONFLICT (id) DO UPDATE SET business_name = EXCLUDED.business_name, notice_period_months = EXCLUDED.notice_period_months, organization_id = EXCLUDED.organization_id`,
+        `INSERT INTO app_settings (business_name, notice_period_months, organization_id)
+         VALUES ($1, 3, $2)
+         ON CONFLICT (organization_id) DO UPDATE SET business_name = EXCLUDED.business_name`,
         [business_name.trim(), organizationId]
       );
 

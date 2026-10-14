@@ -12,8 +12,15 @@ async function getSettings(req, res, next) {
     if (rows[0]) {
       res.json(rows[0]);
     } else {
-      // Fallback for organizations without settings yet
-      res.json({ business_name: 'Your Property Business', notice_period_months: 3 });
+      // Fallback to organization name when no settings row exists
+      const orgResult = await pool.query(
+        'SELECT name FROM organizations WHERE id = $1',
+        [req.user.organization_id]
+      );
+      res.json({
+        business_name: orgResult.rows[0]?.name || 'Your Property Business',
+        notice_period_months: 3
+      });
     }
   } catch (err) {
     next(err);

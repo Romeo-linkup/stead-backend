@@ -147,7 +147,14 @@ router.post('/test', auth, requireRole('owner'), testRateLimit, async (req, res,
       'SELECT business_name FROM app_settings WHERE organization_id = $1',
       [req.user.organization_id]
     );
-    const businessName = businessResult.rows[0]?.business_name || 'Your Property Business';
+    let businessName = businessResult.rows[0]?.business_name;
+    if (!businessName) {
+      const orgResult = await pool.query(
+        'SELECT name FROM organizations WHERE id = $1',
+        [req.user.organization_id]
+      );
+      businessName = orgResult.rows[0]?.name || 'Your Property Business';
+    }
 
     const result = await sendDirect({
       to: user.email,

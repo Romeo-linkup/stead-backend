@@ -127,3 +127,7 @@ These routes are authenticated with a separate JWT secret and are only accessibl
 | GET | /platform/ledger | platform_admin | Cross-organisation ledger, paginated |
 | GET | /platform/ledger/verify | platform_admin | Verifies ledger hash chain |
 | GET | /platform/ledger/export.csv | platform_admin | Exports ledger to CSV |
+
+## Database tables with organization scoping
+
+- `app_settings`: one row per organisation (unique organization_id)

@@ -370,7 +370,14 @@ async function loadBusinessName(organizationId) {
     'SELECT business_name FROM app_settings WHERE organization_id = $1',
     [organizationId]
   );
-  return rows[0]?.business_name || 'Stead';
+  if (rows[0]?.business_name) {
+    return rows[0].business_name;
+  }
+  const orgResult = await pool.query(
+    'SELECT name FROM organizations WHERE id = $1',
+    [organizationId]
+  );
+  return orgResult.rows[0]?.name || 'Stead';
 }
 
 function scopeLeaseForPdf(req, lease) {

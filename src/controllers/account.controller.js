@@ -168,7 +168,14 @@ async function deleteAccount(req, res, next) {
       'SELECT business_name FROM app_settings WHERE organization_id = $1',
       [organizationId]
     );
-    const businessName = settingsResult.rows[0]?.business_name || '';
+    let businessName = settingsResult.rows[0]?.business_name;
+    if (!businessName) {
+      const orgResult = await pool.query(
+        'SELECT name FROM organizations WHERE id = $1',
+        [organizationId]
+      );
+      businessName = orgResult.rows[0]?.name || '';
+    }
     if (confirm_name.trim().toLowerCase() !== businessName.trim().toLowerCase()) {
       return res.status(400).json({ error: 'Business name does not match.' });
     }

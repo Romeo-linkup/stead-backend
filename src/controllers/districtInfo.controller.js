@@ -49,7 +49,7 @@ async function getDistrictInfo(req, res, next) {
       'SELECT notice_period_months FROM app_settings WHERE organization_id = $1',
       [orgId(req)]
     );
-    const noticePeriodMonths = Number(noticePeriodResult.rows[0]?.notice_period_months);
+    const noticePeriodMonths = Number(noticePeriodResult.rows[0]?.notice_period_months) || 3;
     const { rows } = await pool.query(
       'SELECT section_key, body FROM district_info WHERE district_id = $1',
       [districtId]
