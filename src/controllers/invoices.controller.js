@@ -398,19 +398,25 @@ async function listInvoices(req, res, next) {
       conditions.push(`i.district_id = $${params.length}`);
     }
 
+    if (req.user.role !== 'service_provider') {
+      params.push(req.user.organization_id);
+      conditions.push(`d.organization_id = $${params.length}`);
+    }
+
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const { rows } = await pool.query(
       `SELECT i.id, i.maintenance_request_id, i.status, i.to_party, i.note,
               i.payout_account, i.total, i.review_note, i.reviewed_at, i.paid_at,
               i.created_at, m.category AS task_category,
               left(m.description, 200) AS task_description, u.unit_number,
-              p.name AS property_name, pu.name AS provider_name
-       FROM invoices i
+              p.name AS property_name, pu.name AS provider_name, pu.avatar_url AS provider_avatar_url
+        FROM invoices i
        JOIN maintenance_requests m ON m.id = i.maintenance_request_id
-       JOIN units u ON u.id = m.unit_id
-       JOIN properties p ON p.id = u.property_id
-       JOIN users pu ON pu.id = i.provider_user_id
-       ${where}
+        JOIN units u ON u.id = m.unit_id
+        JOIN properties p ON p.id = u.property_id
+        JOIN users pu ON pu.id = i.provider_user_id
+        JOIN districts d ON d.id = i.district_id
+        ${where}
        ORDER BY i.created_at DESC
        LIMIT 200`,
       params
@@ -423,9 +429,11 @@ async function listInvoices(req, res, next) {
 
 async function loadManagedInvoice(invoiceId, req, res) {
   const { rows } = await pool.query(
-    `SELECT id, maintenance_request_id, district_id, status
-     FROM invoices WHERE id = $1`,
-    [invoiceId]
+    `SELECT i.id, i.maintenance_request_id, i.district_id, i.status
+     FROM invoices i
+     JOIN districts d ON d.id = i.district_id
+     WHERE i.id = $1 AND d.organization_id = $2`,
+    [invoiceId, req.user.organization_id]
   );
   const invoice = rows[0];
   if (!invoice) {

@@ -387,6 +387,12 @@ async function deleteAccount(req, res, next) {
     );
 
     await client.query(
+      `DELETE FROM cashflow_items
+       WHERE organization_id = $1`,
+      [organizationId]
+    );
+
+    await client.query(
       `DELETE FROM units
        WHERE property_id IN (
          SELECT p.id FROM properties p

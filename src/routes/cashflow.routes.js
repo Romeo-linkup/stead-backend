@@ -1,0 +1,14 @@
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth');
+const { requireRole } = require('../middleware/requireRole');
+const { listCashflow, listHistory, createItem, updateItem, archiveItem } = require('../controllers/cashflow.controller');
+
+// Owner only. Every query is also scoped to the owner's organisation inside the controller.
+router.get('/', auth, requireRole('owner'), listCashflow);
+router.get('/history', auth, requireRole('owner'), listHistory);
+router.post('/', auth, requireRole('owner'), createItem);
+router.patch('/:id', auth, requireRole('owner'), updateItem);
+router.post('/:id/archive', auth, requireRole('owner'), archiveItem);
+
+module.exports = router;
