@@ -52,4 +52,22 @@ async function deleteImage(publicId) {
   }
 }
 
-module.exports = { uploadImage, uploadReceipt, deleteImage };
+// Square, face-aware crop at 256px. Returns the URL and public_id so the old photo can be deleted on replace.
+async function uploadAvatar(fileBuffer, folder) {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        resource_type: 'image',
+        transformation: [{ width: 256, height: 256, crop: 'fill', gravity: 'auto', quality: 'auto' }],
+      },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve({ url: result.secure_url, public_id: result.public_id });
+      }
+    );
+    uploadStream.end(fileBuffer);
+  });
+}
+
+module.exports = { uploadImage, uploadReceipt, deleteImage, uploadAvatar };

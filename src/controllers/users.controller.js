@@ -3,6 +3,7 @@ const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { allowedDistrictIds } = require('../utils/scope');
 const { sendVerificationEmail } = require('../services/notify.service');
+const { uploadAvatar, deleteImage } = require('../services/cloudinary.service');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -10,7 +11,7 @@ async function getProfile(req, res, next) {
   try {
     const userId = req.user.user_id;
     const { rows } = await pool.query(
-      `SELECT id, name, phone, email, email_notifications, role, district_id, next_of_kin, service_specialty, created_at,
+      `SELECT id, name, phone, email, email_notifications, role, district_id, next_of_kin, service_specialty, created_at, avatar_url,
        (email_verified_at IS NOT NULL) AS email_verified,
        CASE WHEN role = 'admin' THEN all_districts ELSE false END AS all_districts,
        CASE WHEN role = 'admin' THEN district_ids ELSE NULL END AS district_ids
@@ -111,7 +112,18 @@ async function updateProfile(req, res, next) {
       metadata: { updated_fields: updates },
     });
 
-    res.json(user);
+    res.json({
+      id: user.id,
+      name: user.name,
+      phone: user.phone,
+      email: user.email,
+      email_notifications: user.email_notifications,
+      role: user.role,
+      district_id: user.district_id,
+      next_of_kin: user.next_of_kin,
+      service_specialty: user.service_specialty,
+      avatar_url: user.avatar_url,
+    });
 
     if (emailChanged) {
       setImmediate(() => sendVerificationEmail(user.id).catch(() => {}));
@@ -121,19 +133,66 @@ async function updateProfile(req, res, next) {
   }
 }
 
+// Tenants and service providers only. Replaces the photo and deletes the old one from Cloudinary.
+async function setAvatar(req, res, next) {
+  try {
+    const userId = req.user.user_id;
+    if (!['tenant', 'service_provider'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Profile photos are for tenants and service providers.' });
+    }
+    if (!req.file) return res.status(400).json({ error: 'Choose a photo to upload.' });
+
+    const current = await pool.query('SELECT avatar_public_id FROM users WHERE id = $1', [userId]);
+    if (!current.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const oldPublicId = current.rows[0].avatar_public_id;
+
+    const uploaded = await uploadAvatar(req.file.buffer, `stead/avatars/org-${req.user.organization_id}`);
+
+    let updated;
+    try {
+      updated = await pool.query(
+        `UPDATE users SET avatar_url = $1, avatar_public_id = $2, avatar_updated_at = now()
+         WHERE id = $3 RETURNING avatar_url`,
+        [uploaded.url, uploaded.public_id, userId]
+      );
+    } catch (err) {
+      await deleteImage(uploaded.public_id);
+      throw err;
+    }
+
+    if (oldPublicId) await deleteImage(oldPublicId);
+
+    await writeAudit({
+      actorId: userId,
+      actorRole: req.user.role,
+      districtId: req.user.district_id,
+      action: 'user.update_avatar',
+      entityType: 'user',
+      entityId: userId,
+      metadata: {},
+    });
+
+    res.json({ avatar_url: updated.rows[0].avatar_url });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // Needed by admin/maintenance.page.js for the provider list in the assign
 // dropdown. Deliberately narrow: service providers only, and only the fields
 // that dropdown needs. Never expose code_id / code or any other user data.
+const LISTABLE_ROLES = ['service_provider', 'tenant'];
+
 async function listUsers(req, res, next) {
   try {
     const { role, district_id: districtFilter } = req.query;
 
-    if (role !== 'service_provider') {
-      return res.status(400).json({ error: "role must be 'service_provider'." });
+    if (!LISTABLE_ROLES.includes(role)) {
+      return res.status(400).json({ error: "role must be 'service_provider' or 'tenant'." });
     }
 
     const clauses = ['u.role = $1', 'u.organization_id = $2'];
-    const values = ['service_provider', req.user.organization_id];
+    const values = [role, req.user.organization_id];
     let i = 3;
 
     // district_id is an owner-only convenience filter. For everyone else the
@@ -162,7 +221,7 @@ async function listUsers(req, res, next) {
     }
 
     const { rows } = await pool.query(
-      `SELECT u.id, u.name, u.phone, u.district_id, d.name AS district_name
+      `SELECT u.id, u.name, u.phone, u.district_id, d.name AS district_name, u.avatar_url
        FROM users u
        LEFT JOIN districts d ON d.id = u.district_id
        WHERE ${clauses.join(' AND ')}
@@ -175,4 +234,4 @@ async function listUsers(req, res, next) {
   }
 }
 
-module.exports = { getProfile, updateProfile, listUsers };
+module.exports = { getProfile, updateProfile, listUsers, setAvatar };

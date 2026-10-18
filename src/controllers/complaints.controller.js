@@ -16,6 +16,7 @@ function redact(row) {
 	if (row.is_anonymous) {
 		row.submitted_by = null;
 		row.submitted_by_name = null;
+		row.submitted_by_avatar_url = null;
 		row.unit_id = null;
 		row.unit_number = null;
 		row.property_name = null;
@@ -111,6 +112,7 @@ async function listComplaints(req, res, next) {
 							c.category, c.description, c.status, c.created_at, c.resolved_at,
 							CASE WHEN c.is_anonymous THEN NULL ELSE c.submitted_by END AS submitted_by,
 							CASE WHEN c.is_anonymous THEN NULL ELSE u.name END AS submitted_by_name,
+							CASE WHEN c.is_anonymous THEN NULL ELSE u.avatar_url END AS submitted_by_avatar_url,
 							CASE WHEN c.is_anonymous THEN NULL ELSE un.unit_number END AS unit_number,
 							CASE WHEN c.is_anonymous THEN NULL ELSE pr.name END AS property_name
 			 FROM complaints c
@@ -167,6 +169,7 @@ async function getComplaint(req, res, next) {
 							c.category, c.description, c.status, c.created_at, c.resolved_at,
 							CASE WHEN c.is_anonymous THEN NULL ELSE c.submitted_by END AS submitted_by,
 							CASE WHEN c.is_anonymous THEN NULL ELSE u.name END AS submitted_by_name,
+							CASE WHEN c.is_anonymous THEN NULL ELSE u.avatar_url END AS submitted_by_avatar_url,
 							CASE WHEN c.is_anonymous THEN NULL ELSE un.unit_number END AS unit_number,
 							CASE WHEN c.is_anonymous THEN NULL ELSE pr.name END AS property_name
 			 FROM complaints c

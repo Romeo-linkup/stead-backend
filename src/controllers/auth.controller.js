@@ -23,6 +23,7 @@ const { writeAudit } = require('../services/audit.service');
 const { writeLedger } = require('../services/ledger.service');
 const { validateName, validatePhone } = require('../utils/validators');
 const { sendVerificationEmail, sendDirect } = require('../services/notify.service');
+const { uploadAvatar, deleteImage } = require('../services/cloudinary.service');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -183,6 +184,15 @@ async function registerName(req, res, next) {
       user = existing.rows[0];
       await pool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
     } else {
+      const needsPhoto = payload.role === 'tenant' || payload.role === 'service_provider';
+      if (needsPhoto && !req.file) {
+        return res.status(400).json({ error: 'A profile photo is required.' });
+      }
+      let avatar = null;
+      if (req.file) {
+        avatar = await uploadAvatar(req.file.buffer, `stead/avatars/org-${payload.organization_id}`);
+      }
+
       const client = await pool.connect();
       let transactionStarted = false;
       try {
@@ -190,10 +200,13 @@ async function registerName(req, res, next) {
         transactionStarted = true;
 
         const inserted = await client.query(
-          `INSERT INTO users (name, phone, email, role, district_id, code_id, organization_id, last_login_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+          `INSERT INTO users (name, phone, email, role, district_id, code_id, organization_id, last_login_at,
+                              avatar_url, avatar_public_id, avatar_updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9,
+                   CASE WHEN $8::text IS NULL THEN NULL ELSE now() END)
            RETURNING *`,
-          [name.trim(), phone || null, emailValue, payload.role, payload.district_id, payload.code_id, payload.organization_id]
+          [name.trim(), phone || null, emailValue, payload.role, payload.district_id, payload.code_id,
+           payload.organization_id, avatar ? avatar.url : null, avatar ? avatar.public_id : null]
         );
         user = inserted.rows[0];
 
@@ -213,6 +226,7 @@ async function registerName(req, res, next) {
         transactionStarted = false;
       } catch (err) {
         if (transactionStarted) await client.query('ROLLBACK');
+        if (avatar) await deleteImage(avatar.public_id);
         throw err;
       } finally {
         client.release();

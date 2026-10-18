@@ -8,12 +8,14 @@ const { allowedDistrictIds, assertDistrictAccess } = require('../utils/scope');
 // name. Only the WHERE clause differs per role.
 const MAINTENANCE_SELECT = `
   SELECT mr.*, u.unit_number, p.name AS property_name, p.district_id,
-         d.name AS district_name, a.name AS assigned_to_name, mr.updated_at
+         d.name AS district_name, a.name AS assigned_to_name, a.avatar_url AS assigned_to_avatar_url,
+         rep.name AS reported_by_name, rep.avatar_url AS reported_by_avatar_url, mr.updated_at
   FROM maintenance_requests mr
   JOIN units u ON u.id = mr.unit_id
   JOIN properties p ON p.id = u.property_id
   JOIN districts d ON d.id = p.district_id
-  LEFT JOIN users a ON a.id = mr.assigned_to`;
+  LEFT JOIN users a ON a.id = mr.assigned_to
+  LEFT JOIN users rep ON rep.id = mr.reported_by`;
 
 async function listMaintenance(req, res, next) {
   try {
@@ -167,12 +169,14 @@ async function assignMaintenance(req, res, next) {
          RETURNING *
        )
        SELECT mr.*, u.unit_number, p.name AS property_name, p.district_id,
-              d.name AS district_name, a.name AS assigned_to_name
+              d.name AS district_name, a.name AS assigned_to_name, a.avatar_url AS assigned_to_avatar_url,
+              rep.name AS reported_by_name, rep.avatar_url AS reported_by_avatar_url
        FROM updated mr
        JOIN units u ON u.id = mr.unit_id
        JOIN properties p ON p.id = u.property_id
        JOIN districts d ON d.id = p.district_id
-       LEFT JOIN users a ON a.id = mr.assigned_to`,
+       LEFT JOIN users a ON a.id = mr.assigned_to
+       LEFT JOIN users rep ON rep.id = mr.reported_by`,
       [providerId, requestId]
     );
     const updatedRequest = rows[0];
