@@ -20,7 +20,30 @@ const TERM_TEXT_KEYS = [
   'additional_charges', 'payments', 'pets', 'assignment_subletting',
   'sundry_duties', 'maintenance', 'special_remedy', 'option_of_renewal',
 ];
+const CLAUSE_KEYS = [
+  'additional_charges', 'payments', 'pets', 'assignment_subletting',
+  'sundry_duties', 'maintenance', 'special_remedy', 'option_of_renewal',
+];
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+// Returns { ok: true, value } (value undefined when not supplied) or { ok: false, error }.
+function validateClauseTitles(value) {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, error: 'Clause headings are invalid.' };
+  }
+  const clean = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!CLAUSE_KEYS.includes(key)) return { ok: false, error: 'Unknown clause heading.' };
+    if (typeof raw !== 'string') return { ok: false, error: 'Clause headings must be text.' };
+    const title = raw.replace(/\s+/g, ' ').trim();
+    if (title.length < 1 || title.length > 60 || /[\u0000-\u001f\u007f]/.test(title)) {
+      return { ok: false, error: 'Each clause heading must be 1 to 60 characters.' };
+    }
+    clean[key] = title;
+  }
+  return { ok: true, value: clean };
+}
 
 function parseId(raw) {
   const id = Number(raw);
@@ -181,6 +204,18 @@ function validateLeaseFields(body, { partial, current = {} }) {
       }
       cleanTerms.notice_period_months = months;
     }
+
+    // Validate clause_titles if present
+    if (Object.prototype.hasOwnProperty.call(terms, 'clause_titles')) {
+      const clauseTitlesValidation = validateClauseTitles(terms.clause_titles);
+      if (!clauseTitlesValidation.ok) {
+        return { error: clauseTitlesValidation.error };
+      }
+      if (clauseTitlesValidation.value !== undefined) {
+        cleanTerms.clause_titles = clauseTitlesValidation.value;
+      }
+    }
+
     values.terms_json = cleanTerms;
   }
 
@@ -723,6 +758,23 @@ async function updateLease(req, res, next) {
         }
       }
       if (!existingTerms || typeof existingTerms !== 'object' || Array.isArray(existingTerms)) existingTerms = {};
+
+      // Check clause_titles locking for sent leases
+      if (lease.status === 'sent' && Object.prototype.hasOwnProperty.call(values.terms_json, 'clause_titles')) {
+        const existingTitles = existingTerms.clause_titles || {};
+        const incomingTitles = values.terms_json.clause_titles;
+
+        for (const key of CLAUSE_KEYS) {
+          const existingTitle = existingTitles[key] || null;
+          const incomingTitle = incomingTitles[key] || null;
+
+          // Compare titles, treating missing as default (null)
+          if (existingTitle !== incomingTitle) {
+            return res.status(400).json({ error: 'Clause headings can\'t be changed once a lease has been sent.' });
+          }
+        }
+      }
+
       values.terms_json = { ...existingTerms, ...values.terms_json };
     }
 

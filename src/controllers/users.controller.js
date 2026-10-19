@@ -234,4 +234,36 @@ async function listUsers(req, res, next) {
   }
 }
 
-module.exports = { getProfile, updateProfile, listUsers, setAvatar };
+async function removeAvatar(req, res, next) {
+  try {
+    const userId = req.user.user_id;
+    if (!['tenant', 'service_provider'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Profile photos are for tenants and service providers.' });
+    }
+
+    const current = await pool.query('SELECT avatar_public_id FROM users WHERE id = $1', [userId]);
+    if (!current.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const oldPublicId = current.rows[0].avatar_public_id;
+
+    await pool.query(
+      'UPDATE users SET avatar_url = NULL, avatar_public_id = NULL, avatar_updated_at = NULL WHERE id = $1',
+      [userId]
+    );
+    if (oldPublicId) await deleteImage(oldPublicId);
+
+    await writeAudit({
+      actorId: userId,
+      actorRole: req.user.role,
+      districtId: req.user.district_id,
+      action: 'user.remove_avatar',
+      entityType: 'user',
+      entityId: userId,
+      metadata: {},
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+}
+module.exports = { getProfile, updateProfile, listUsers, setAvatar, removeAvatar };

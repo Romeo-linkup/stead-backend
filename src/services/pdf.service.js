@@ -14,6 +14,23 @@ function renderLeaseHtml(lease) {
     terms = {};
   }
 
+  const clauseTitles = terms.clause_titles && typeof terms.clause_titles === 'object' && !Array.isArray(terms.clause_titles)
+    ? terms.clause_titles
+    : {};
+
+  const defaultTitles = {
+    additional_charges: 'ADDITIONAL CHARGES',
+    payments: 'PAYMENTS',
+    pets: 'PETS',
+    assignment_subletting: 'ASSIGNMENT & SUBLETTING',
+    sundry_duties: 'SUNDRY DUTIES',
+    maintenance: 'MAINTENANCE',
+    special_remedy: 'SPECIAL REMEDY',
+    option_of_renewal: 'OPTION OF RENEWAL',
+  };
+
+  const titleFor = (key) => clauseTitles[key] || defaultTitles[key];
+
   const formatDate = (date) => {
     if (date == null || date === '') return '';
     const parsedDate = new Date(date);
@@ -211,70 +228,70 @@ function renderLeaseHtml(lease) {
     </div>
     
     <div class="section">
-      <h2>3. ADDITIONAL CHARGES</h2>
+      <h2>3. ${escapeHtml(titleFor('additional_charges'))}</h2>
       <div class="clause-content">
         ${clause('additional_charges', 'The tenant shall be responsible for utilities and services as specified in the schedule.')}
       </div>
     </div>
-    
+
     <div class="section">
-      <h2>4. PAYMENTS</h2>
+      <h2>4. ${escapeHtml(titleFor('payments'))}</h2>
       <div class="clause-content">
         ${clause('payments', 'Rent shall be paid by electronic transfer to the landlord\'s designated bank account. The tenant shall provide proof of payment upon request.')}
       </div>
     </div>
-    
+
     <div class="section">
       <h2>5. DEPOSIT</h2>
       <div class="clause-content">
         A deposit of ${escapeHtml(formatCurrency(lease.deposit_amount))} shall be paid prior to occupation. This deposit shall be returned within 14 days of lease termination, less any deductions for damages or outstanding amounts.
       </div>
     </div>
-    
+
     <div class="section">
       <h2>6. CANCELLATION</h2>
       <div class="clause-content">
         ${escapeHtml(cancellationNotice)}${escapeHtml(cancellationPenalty)}
       </div>
     </div>
-    
+
     <div class="section">
-      <h2>7. PETS</h2>
+      <h2>7. ${escapeHtml(titleFor('pets'))}</h2>
       <div class="clause-content">
         ${clause('pets', 'No pets shall be kept on the premises without the landlord\'s prior written consent.')}
       </div>
     </div>
-    
+
     <div class="section">
-      <h2>8. ASSIGNMENT & SUBLETTING</h2>
+      <h2>8. ${escapeHtml(titleFor('assignment_subletting'))}</h2>
       <div class="clause-content">
         ${clause('assignment_subletting', 'The tenant shall not assign or sublet the premises without the landlord\'s prior written consent.')}
       </div>
     </div>
-    
+
     <div class="section">
-      <h2>9. SUNDRY DUTIES</h2>
+      <h2>9. ${escapeHtml(titleFor('sundry_duties'))}</h2>
       <div class="clause-content">
         ${clause('sundry_duties', 'The tenant shall keep the premises in a clean and habitable condition, and shall comply with all reasonable rules and regulations of the property.')}
       </div>
     </div>
-    
+
     <div class="section">
-      <h2>10. MAINTENANCE</h2>
+      <h2>10. ${escapeHtml(titleFor('maintenance'))}</h2>
       <div class="clause-content">
         ${clause('maintenance', 'The landlord shall be responsible for structural maintenance, while the tenant shall be responsible for day-to-day maintenance and minor repairs.')}
       </div>
     </div>
-    
+
     <div class="section">
-      <h2>11. SPECIAL REMEDY</h2>
+      <h2>11. ${escapeHtml(titleFor('special_remedy'))}</h2>
       <div class="clause-content">
         ${clause('special_remedy', 'In the event of breach, the landlord shall have all remedies available at law and equity, including but not limited to eviction and damages.')}
       </div>
     </div>
-    
+
     <div class="section">
-      <h2>12. OPTION OF RENEWAL</h2>
+      <h2>12. ${escapeHtml(titleFor('option_of_renewal'))}</h2>
       <div class="clause-content">
         ${clause('option_of_renewal', 'This lease may be renewed upon mutual agreement of both parties, subject to rent adjustment and terms to be negotiated.')}
       </div>

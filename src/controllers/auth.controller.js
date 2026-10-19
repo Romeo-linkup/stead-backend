@@ -184,10 +184,7 @@ async function registerName(req, res, next) {
       user = existing.rows[0];
       await pool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
     } else {
-      const needsPhoto = payload.role === 'tenant' || payload.role === 'service_provider';
-      if (needsPhoto && !req.file) {
-        return res.status(400).json({ error: 'A profile photo is required.' });
-      }
+
       let avatar = null;
       if (req.file) {
         avatar = await uploadAvatar(req.file.buffer, `stead/avatars/org-${payload.organization_id}`);

@@ -109,7 +109,7 @@ async function updateProperty(req, res, next) {
     }
 
     const lookup = await pool.query(
-      `SELECT p.*, d.name AS district_name, d.district_id AS district_id
+      `SELECT p.*, d.name AS district_name
        FROM properties p
        JOIN districts d ON d.id = p.district_id
        WHERE p.id = $1`,
@@ -188,6 +188,11 @@ async function deleteProperty(req, res, next) {
     );
     if (unitCount.rows[0].count > 0) {
       return res.status(409).json({ error: 'Remove or move its units first.' });
+    }
+
+    const cashflowCount = await pool.query('SELECT 1 FROM cashflow_items WHERE property_id = $1 LIMIT 1', [propertyId]);
+    if (cashflowCount.rows[0]) {
+      return res.status(409).json({ error: "This property has cashflow records, so it can't be deleted." });
     }
 
     const { rows } = await pool.query(

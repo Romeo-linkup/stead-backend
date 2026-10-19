@@ -5,13 +5,15 @@ const CATEGORIES = {
   in: ['rent_income', 'other_income'],
   out: ['bond_payment', 'municipal', 'water', 'electricity', 'insurance', 'levies', 'salaries', 'maintenance', 'other_expense'],
 };
-const MAX_ACTIVE_ITEMS = 200;
+const MAX_ACTIVE_ITEMS = 100; // per property
 const MAX_CENTS = 10000000000; // R100,000,000.00
 
 const ITEM_SELECT = `
-  SELECT i.id, i.direction, i.category, i.label, i.amount, i.day_of_month, i.note, i.version,
-         i.created_at, i.updated_at, i.amount_updated_at, au.name AS amount_updated_by_name
+  SELECT i.id, i.property_id, pr.name AS property_name, i.direction, i.category, i.label, i.amount,
+         i.day_of_month, i.note, i.version, i.created_at, i.updated_at, i.amount_updated_at,
+         au.name AS amount_updated_by_name
   FROM cashflow_items i
+  LEFT JOIN properties pr ON pr.id = i.property_id
   LEFT JOIN users au ON au.id = i.amount_updated_by`;
 
 function parseId(raw) {
@@ -39,6 +41,23 @@ function numericToCents(text) {
 
 function centsToString(cents) {
   return (cents / 100).toFixed(2);
+}
+
+function summarise(rows) {
+  let inCents = 0;
+  let outCents = 0;
+  for (const row of rows) {
+    const cents = numericToCents(row.amount);
+    if (row.direction === 'in') inCents += cents;
+    else outCents += cents;
+  }
+  const net = inCents - outCents;
+  return {
+    in: centsToString(inCents),
+    out: centsToString(outCents),
+    net: centsToString(net),
+    status: net > 0 ? 'profit' : net < 0 ? 'loss' : 'break_even',
+  };
 }
 
 function readLabel(value) {
@@ -78,6 +97,7 @@ function snapshot(row) {
     day_of_month: row.day_of_month,
     amount: row.amount,
     note: row.note || null,
+    property_id: row.property_id ?? null,
   };
 }
 
@@ -91,31 +111,36 @@ async function listCashflow(req, res, next) {
     const orgId = orgIdOf(req, res);
     if (!orgId) return;
 
-    const { rows } = await pool.query(
-      `${ITEM_SELECT}
-       WHERE i.organization_id = $1 AND i.archived_at IS NULL
-       ORDER BY i.day_of_month, i.id`,
-      [orgId]
-    );
+    const [itemsResult, propertiesResult] = await Promise.all([
+      pool.query(
+        `${ITEM_SELECT}
+         WHERE i.organization_id = $1 AND i.archived_at IS NULL
+         ORDER BY i.day_of_month, i.id`,
+        [orgId]
+      ),
+      pool.query(
+        `SELECT p.id, p.name, d.name AS district_name
+         FROM properties p
+         JOIN districts d ON d.id = p.district_id
+         WHERE d.organization_id = $1
+         ORDER BY d.name, p.name`,
+        [orgId]
+      ),
+    ]);
 
-    let inCents = 0;
-    let outCents = 0;
-    for (const row of rows) {
-      const cents = numericToCents(row.amount);
-      if (row.direction === 'in') inCents += cents;
-      else outCents += cents;
-    }
-    const net = inCents - outCents;
+    const items = itemsResult.rows;
+    const properties = propertiesResult.rows.map((p) => {
+      const rows = items.filter((i) => i.property_id === p.id);
+      return { id: p.id, name: p.name, district_name: p.district_name, item_count: rows.length, totals: summarise(rows) };
+    });
+    const unassigned = items.filter((i) => i.property_id == null);
 
     res.set('Cache-Control', 'no-store');
     res.json({
-      items: rows,
-      totals: {
-        in: centsToString(inCents),
-        out: centsToString(outCents),
-        net: centsToString(net),
-        status: net > 0 ? 'profit' : net < 0 ? 'loss' : 'break_even',
-      },
+      items,
+      properties,
+      unassigned: { count: unassigned.length, totals: summarise(unassigned) },
+      totals: summarise(items),
     });
   } catch (err) {
     next(err);
@@ -129,10 +154,11 @@ async function listHistory(req, res, next) {
 
     const { rows } = await pool.query(
       `SELECT h.id, h.item_id, h.change_type, h.old_values, h.new_values, h.reason, h.changed_at,
-              u.name AS changed_by_name, i.label AS item_label, i.direction
+              u.name AS changed_by_name, i.label AS item_label, i.direction, pr.name AS property_name
        FROM cashflow_history h
        JOIN users u ON u.id = h.changed_by
        JOIN cashflow_items i ON i.id = h.item_id
+       LEFT JOIN properties pr ON pr.id = i.property_id
        WHERE h.organization_id = $1
        ORDER BY h.changed_at DESC, h.id DESC
        LIMIT 200`,
@@ -167,12 +193,23 @@ async function createItem(req, res, next) {
     const note = readNote(body.note);
     if (!note.ok) return res.status(400).json({ error: 'Note must be 300 characters or fewer.' });
 
+    const propertyId = parseId(String(body.property_id ?? ''));
+    if (!propertyId) return res.status(400).json({ error: 'Choose the property this belongs to.' });
+    const propertyCheck = await pool.query(
+      `SELECT p.id FROM properties p
+       JOIN districts d ON d.id = p.district_id
+       WHERE p.id = $1 AND d.organization_id = $2`,
+      [propertyId, orgId]
+    );
+    if (!propertyCheck.rows[0]) return res.status(404).json({ error: 'Property not found.' });
+
     const count = await pool.query(
-      'SELECT count(*)::int AS n FROM cashflow_items WHERE organization_id = $1 AND archived_at IS NULL',
-      [orgId]
+      `SELECT count(*)::int AS n FROM cashflow_items
+       WHERE organization_id = $1 AND property_id = $2 AND archived_at IS NULL`,
+      [orgId, propertyId]
     );
     if (count.rows[0].n >= MAX_ACTIVE_ITEMS) {
-      return res.status(409).json({ error: `You can have at most ${MAX_ACTIVE_ITEMS} active cashflow items.` });
+      return res.status(409).json({ error: `A property can have at most ${MAX_ACTIVE_ITEMS} active cashflow items.` });
     }
 
     const client = await pool.connect();
@@ -181,11 +218,11 @@ async function createItem(req, res, next) {
       await client.query('BEGIN');
       const inserted = await client.query(
         `INSERT INTO cashflow_items
-           (organization_id, direction, category, label, amount, day_of_month, note,
+           (organization_id, property_id, direction, category, label, amount, day_of_month, note,
             created_by, updated_by, amount_updated_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $8)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9)
          RETURNING *`,
-        [orgId, direction, body.category, label, centsToString(cents), day, note.value, req.user.user_id]
+        [orgId, propertyId, direction, body.category, label, centsToString(cents), day, note.value, req.user.user_id]
       );
       item = inserted.rows[0];
       await client.query(
@@ -256,6 +293,12 @@ async function updateItem(req, res, next) {
     }
     const reason = readReason(body.reason);
 
+    let assignPropertyId;
+    if (body.property_id !== undefined) {
+      assignPropertyId = parseId(String(body.property_id ?? ''));
+      if (!assignPropertyId) return res.status(400).json({ error: 'Choose a valid property.' });
+    }
+
     const client = await pool.connect();
     let updated;
     let changedFields;
@@ -273,6 +316,19 @@ async function updateItem(req, res, next) {
         return await fail(client, res, 409, 'This item was changed by someone else. Refresh and try again.');
       }
 
+      if (before.property_id == null) {
+        if (!assignPropertyId) return await fail(client, res, 400, 'Choose which property this item belongs to.');
+        const propertyCheck = await client.query(
+          `SELECT p.id FROM properties p
+           JOIN districts d ON d.id = p.district_id
+           WHERE p.id = $1 AND d.organization_id = $2`,
+          [assignPropertyId, orgId]
+        );
+        if (!propertyCheck.rows[0]) return await fail(client, res, 404, 'Property not found.');
+      } else if (assignPropertyId !== undefined && assignPropertyId !== before.property_id) {
+        return await fail(client, res, 400, 'An item cannot be moved to another property. Remove it and add it again under the right property.');
+      }
+
       const oldVals = snapshot(before);
       const nextVals = snapshot(before);
       if (changes.label !== undefined) nextVals.label = changes.label;
@@ -285,26 +341,27 @@ async function updateItem(req, res, next) {
       if (changes.day !== undefined) nextVals.day_of_month = changes.day;
       if (changes.cents !== undefined) nextVals.amount = centsToString(changes.cents);
       if (changes.note !== undefined) nextVals.note = changes.note;
+      if (before.property_id == null) nextVals.property_id = assignPropertyId;
 
       changedFields = Object.keys(nextVals).filter((key) => (nextVals[key] ?? null) !== (oldVals[key] ?? null));
       if (changedFields.length === 0) return await fail(client, res, 400, 'Nothing was changed.');
 
       const amountChanged = changedFields.includes('amount');
-      const sensitive = amountChanged || changedFields.includes('day_of_month');
+      const sensitive = amountChanged || changedFields.includes('day_of_month') || changedFields.includes('property_id');
       if (sensitive && !reason) {
-        return await fail(client, res, 400, 'A reason of at least 5 characters is required when the amount or date changes.');
+        return await fail(client, res, 400, 'A reason of at least 5 characters is required when the amount, the day or the property changes.');
       }
 
       const result = await client.query(
         `UPDATE cashflow_items
-         SET label = $1, category = $2, day_of_month = $3, amount = $4, note = $5,
-             version = version + 1, updated_by = $6, updated_at = now(),
-             amount_updated_by = CASE WHEN $7::boolean THEN $6 ELSE amount_updated_by END,
-             amount_updated_at = CASE WHEN $7::boolean THEN now() ELSE amount_updated_at END
-         WHERE id = $8
+         SET label = $1, category = $2, day_of_month = $3, amount = $4, note = $5, property_id = $6,
+             version = version + 1, updated_by = $7, updated_at = now(),
+             amount_updated_by = CASE WHEN $8::boolean THEN $7 ELSE amount_updated_by END,
+             amount_updated_at = CASE WHEN $8::boolean THEN now() ELSE amount_updated_at END
+         WHERE id = $9
          RETURNING *`,
         [nextVals.label, nextVals.category, nextVals.day_of_month, nextVals.amount, nextVals.note,
-         req.user.user_id, amountChanged, id]
+         nextVals.property_id, req.user.user_id, amountChanged, id]
       );
       updated = result.rows[0];
 
