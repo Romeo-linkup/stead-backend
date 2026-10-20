@@ -34,6 +34,6 @@ router.post('/:id/image', auth, requireRole('owner', 'admin', 'property_manager'
 router.delete('/:id/image', auth, requireRole('owner', 'admin', 'property_manager'), deletePropertyImage);
 
 router.patch('/:id', auth, requireRole('owner', 'admin', 'property_manager'), updateProperty);
-router.delete('/:id', auth, requireRole('owner', 'admin', 'property_manager'), deleteProperty);
+router.delete('/:id', auth, requireRole('owner', 'admin'), deleteProperty);
 
 module.exports = router;

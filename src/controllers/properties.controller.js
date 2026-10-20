@@ -182,23 +182,23 @@ async function deleteProperty(req, res, next) {
 
     await assertDistrictAccess(req, property.district_id);
 
-    const unitCount = await pool.query(
-      'SELECT COUNT(*)::int AS count FROM units WHERE property_id = $1',
-      [propertyId]
-    );
-    if (unitCount.rows[0].count > 0) {
-      return res.status(409).json({ error: 'Remove or move its units first.' });
+    let deleted;
+    try {
+      deleted = await pool.query('DELETE FROM properties WHERE id = $1 RETURNING *', [propertyId]);
+    } catch (err) {
+      if (err.code === '23503') {
+        return res.status(409).json({ error: "This property still has records linked to it, so it can't be deleted yet." });
+      }
+      throw err;
     }
 
-    const cashflowCount = await pool.query('SELECT 1 FROM cashflow_items WHERE property_id = $1 LIMIT 1', [propertyId]);
-    if (cashflowCount.rows[0]) {
-      return res.status(409).json({ error: "This property has cashflow records, so it can't be deleted." });
+    if (property.image_public_id) {
+      try {
+        await cloudinary.uploader.destroy(property.image_public_id);
+      } catch (err) {
+        console.error('[property delete] failed to delete photo:', err.message);
+      }
     }
-
-    const { rows } = await pool.query(
-      'DELETE FROM properties WHERE id = $1 RETURNING *',
-      [propertyId]
-    );
 
     await writeAudit({
       actorId: req.user.user_id,
@@ -211,7 +211,7 @@ async function deleteProperty(req, res, next) {
       metadata: { name: property.name },
     });
 
-    res.json(rows[0]);
+    res.json(deleted.rows[0]);
   } catch (err) {
     next(err);
   }

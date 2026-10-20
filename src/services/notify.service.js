@@ -261,10 +261,10 @@ async function sendVerificationEmail(userId) {
     const token = jwt.sign(
       { user_id: userId, email: user.email, purpose: 'verify-email' },
       process.env.JWT_SECRET,
-      { expiresIn: '48h' }
+      { expiresIn: '7d' }
     );
-    const base = process.env.BACKEND_PUBLIC_URL || 'http://localhost:4000';
-    const link = `${base}/notifications/verify?token=${token}`;
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const link = `${frontendUrl}/#/confirm-email?token=${token}`;
 
     await sendDirect({
       to: user.email,

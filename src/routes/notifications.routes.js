@@ -32,6 +32,14 @@ const verifyRateLimit = rateLimit({
   message: { error: 'Too many requests. Try again later.' },
 });
 
+const verifyPostRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Try again later.' },
+});
+
 const sendVerificationRateLimit = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 3,
@@ -71,23 +79,58 @@ router.get('/unsubscribe', unsubscribeRateLimit, async (req, res, next) => {
   }
 });
 
-// GET /verify?token= - public, email confirmation
+// GET /verify?token= - public, redirects to frontend, no state change
 router.get('/verify', verifyRateLimit, async (req, res, next) => {
   try {
     const { token } = req.query;
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+    if (!token || typeof token !== 'string' || token.length > 2000) {
+      return res.status(400).send(verifyPage('This confirmation link is invalid. Sign in, open your profile and press "Send confirmation email" to get a new one.'));
+    }
+
+    if (!frontendUrl) {
+      return res.status(400).send(verifyPage('This confirmation link is invalid. Sign in, open your profile and press "Send confirmation email" to get a new one.'));
+    }
+
+    const cleanFrontendUrl = frontendUrl.replace(/\/$/, '');
+    const redirectUrl = `${cleanFrontendUrl}/#/confirm-email?token=${encodeURIComponent(token)}`;
+    return res.redirect(302, redirectUrl);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /verify - public, performs actual verification
+router.post('/verify', verifyPostRateLimit, async (req, res, next) => {
+  try {
+    const { token } = req.body;
     if (!token || typeof token !== 'string') {
-      return res.status(400).send(verifyPage('This link is invalid or has expired. Request a new one from your profile.'));
+      return res.status(400).json({ error: 'This confirmation link is invalid or has expired. Sign in, open your profile and press "Send confirmation email" to get a new one.' });
     }
 
     let payload;
     try {
       payload = jwt.verify(token, process.env.JWT_SECRET);
     } catch (err) {
-      return res.status(400).send(verifyPage('This link is invalid or has expired. Request a new one from your profile.'));
+      return res.status(400).json({ error: 'This confirmation link is invalid or has expired. Sign in, open your profile and press "Send confirmation email" to get a new one.' });
     }
 
     if (payload.purpose !== 'verify-email' || !payload.user_id || !payload.email) {
-      return res.status(400).send(verifyPage('This link is invalid or has expired. Request a new one from your profile.'));
+      return res.status(400).json({ error: 'This confirmation link is invalid or has expired. Sign in, open your profile and press "Send confirmation email" to get a new one.' });
+    }
+
+    const { rows } = await pool.query(
+      'SELECT email_verified_at FROM users WHERE id = $1',
+      [payload.user_id]
+    );
+    const user = rows[0];
+    if (!user) {
+      return res.status(400).json({ error: 'This confirmation link is invalid or has expired. Sign in, open your profile and press "Send confirmation email" to get a new one.' });
+    }
+
+    if (user.email_verified_at) {
+      return res.json({ ok: true, already: true });
     }
 
     const result = await pool.query(
@@ -96,10 +139,10 @@ router.get('/verify', verifyRateLimit, async (req, res, next) => {
     );
 
     if (result.rowCount === 0) {
-      return res.status(400).send(verifyPage('This link is invalid or has expired. Request a new one from your profile.'));
+      return res.status(400).json({ error: 'This confirmation link is invalid or has expired. Sign in, open your profile and press "Send confirmation email" to get a new one.' });
     }
 
-    res.send(verifyPage('Your email is confirmed. You can close this tab.'));
+    res.json({ ok: true, already: false });
   } catch (err) {
     next(err);
   }

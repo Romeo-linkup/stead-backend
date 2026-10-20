@@ -461,4 +461,168 @@ async function archiveItem(req, res, next) {
   }
 }
 
-module.exports = { listCashflow, listHistory, createItem, updateItem, archiveItem };
+const RENT_NOTE_PREFIX = 'Auto-filled from unit rents';
+
+async function loadOwnedProperty(db, orgId, propertyId, lock = false) {
+  const { rows } = await db.query(
+    `SELECT p.id FROM properties p
+     JOIN districts d ON d.id = p.district_id
+     WHERE p.id = $1 AND d.organization_id = $2${lock ? ' FOR UPDATE OF p' : ''}`,
+    [propertyId, orgId]
+  );
+  return rows[0] || null;
+}
+
+// Rent grouped by the day it is due, so one item covers every unit due on the same day.
+async function rentGroups(db, orgId, propertyId, includeVacant) {
+  const { rows } = await db.query(
+    `SELECT LEAST(GREATEST(COALESCE(u.rent_due_day, 1), 1), 31) AS day,
+            count(*)::int AS units,
+            COALESCE(sum(u.rent_amount), 0)::numeric(14,2) AS total
+     FROM units u
+     JOIN properties p ON p.id = u.property_id
+     JOIN districts d ON d.id = p.district_id
+     WHERE u.property_id = $1 AND d.organization_id = $2
+       AND u.rent_amount IS NOT NULL AND u.rent_amount > 0
+       AND ($3::boolean OR u.tenant_user_id IS NOT NULL)
+     GROUP BY 1
+     ORDER BY 1`,
+    [propertyId, orgId, includeVacant]
+  );
+  return rows.map((r) => ({ day: Number(r.day), units: r.units, total: r.total }));
+}
+
+function groupsTotalCents(groups) {
+  return groups.reduce((sum, g) => sum + numericToCents(g.total), 0);
+}
+
+async function rentAlreadyAdded(db, orgId, propertyId) {
+  const { rows } = await db.query(
+    `SELECT 1 FROM cashflow_items
+     WHERE organization_id = $1 AND property_id = $2 AND source = 'rent_from_units' AND archived_at IS NULL
+     LIMIT 1`,
+    [orgId, propertyId]
+  );
+  return Boolean(rows[0]);
+}
+
+async function rentPreview(req, res, next) {
+  try {
+    const orgId = orgIdOf(req, res);
+    if (!orgId) return;
+    const propertyId = parseId(String(req.query.property_id ?? ''));
+    if (!propertyId) return res.status(400).json({ error: 'Choose a property.' });
+    if (!(await loadOwnedProperty(pool, orgId, propertyId))) {
+      return res.status(404).json({ error: 'Property not found.' });
+    }
+    const includeVacant = req.query.include_vacant === 'true';
+
+    const [groups, counts, already] = await Promise.all([
+      rentGroups(pool, orgId, propertyId, includeVacant),
+      pool.query(
+        `SELECT count(*)::int AS units_total,
+                count(*) FILTER (WHERE rent_amount IS NULL OR rent_amount <= 0)::int AS units_without_rent
+         FROM units WHERE property_id = $1`,
+        [propertyId]
+      ),
+      rentAlreadyAdded(pool, orgId, propertyId),
+    ]);
+
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      groups,
+      total: centsToString(groupsTotalCents(groups)),
+      units_counted: groups.reduce((sum, g) => sum + g.units, 0),
+      units_total: counts.rows[0].units_total,
+      units_without_rent: counts.rows[0].units_without_rent,
+      already_added: already,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function addRentFromUnits(req, res, next) {
+  try {
+    const orgId = orgIdOf(req, res);
+    if (!orgId) return;
+    const body = req.body || {};
+    const propertyId = parseId(String(body.property_id ?? ''));
+    if (!propertyId) return res.status(400).json({ error: 'Choose a property.' });
+    const includeVacant = body.include_vacant === true;
+    const expectedCents = parseAmountToCents(body.expected_total);
+    if (!expectedCents) return res.status(400).json({ error: 'Review the unit rents again before adding them.' });
+
+    const client = await pool.connect();
+    let created = 0;
+    try {
+      await client.query('BEGIN');
+      if (!(await loadOwnedProperty(client, orgId, propertyId, true))) {
+        return await fail(client, res, 404, 'Property not found.');
+      }
+      if (await rentAlreadyAdded(client, orgId, propertyId)) {
+        return await fail(client, res, 409, 'Rent from units was already added for this property. Edit or remove those items first.');
+      }
+
+      const groups = (await rentGroups(client, orgId, propertyId, includeVacant))
+        .filter((g) => numericToCents(g.total) > 0);
+      if (!groups.length) {
+        return await fail(client, res, 400, 'No unit rents to add. Set the rent on each unit first.');
+      }
+      if (groupsTotalCents(groups) !== expectedCents) {
+        return await fail(client, res, 409, 'Unit rents changed since you reviewed them. Please review again.');
+      }
+
+      const count = await client.query(
+        `SELECT count(*)::int AS n FROM cashflow_items
+         WHERE organization_id = $1 AND property_id = $2 AND archived_at IS NULL`,
+        [orgId, propertyId]
+      );
+      if (count.rows[0].n + groups.length > MAX_ACTIVE_ITEMS) {
+        return await fail(client, res, 409, `A property can have at most ${MAX_ACTIVE_ITEMS} active cashflow items.`);
+      }
+
+      const today = new Date().toISOString().slice(0, 10);
+      for (const g of groups) {
+        const note = `${RENT_NOTE_PREFIX} on ${today}: ${g.units} unit${g.units === 1 ? '' : 's'}${includeVacant ? ', including vacant units' : ', occupied units only'}.`;
+        const inserted = await client.query(
+          `INSERT INTO cashflow_items
+             (organization_id, property_id, direction, category, label, amount, day_of_month, note, source,
+              created_by, updated_by, amount_updated_by)
+           VALUES ($1, $2, 'in', 'rent_income', $3, $4, $5, $6, 'rent_from_units', $7, $7, $7)
+           RETURNING *`,
+          [orgId, propertyId, `Rent from units — due on day ${g.day}`, g.total, g.day, note, req.user.user_id]
+        );
+        await client.query(
+          `INSERT INTO cashflow_history (item_id, organization_id, change_type, old_values, new_values, reason, changed_by)
+           VALUES ($1, $2, 'create', NULL, $3, $4, $5)`,
+          [inserted.rows[0].id, orgId, JSON.stringify(snapshot(inserted.rows[0])), 'Added from unit rents', req.user.user_id]
+        );
+        created += 1;
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    await writeAudit({
+      actorId: req.user.user_id,
+      actorRole: req.user.role,
+      districtId: null,
+      organizationId: orgId,
+      action: 'cashflow.rent_from_units',
+      entityType: 'property',
+      entityId: propertyId,
+      metadata: {},
+    });
+
+    res.status(201).json({ created });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listCashflow, listHistory, createItem, updateItem, archiveItem, rentPreview, addRentFromUnits };
