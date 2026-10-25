@@ -263,8 +263,8 @@ async function sendVerificationEmail(userId) {
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-    const link = `${frontendUrl}/#/confirm-email?token=${token}`;
+    const frontendUrl = String(process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+    const link = `${frontendUrl}/#/confirm-email?token=${encodeURIComponent(token)}`;
 
     await sendDirect({
       to: user.email,

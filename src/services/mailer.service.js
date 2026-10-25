@@ -77,13 +77,14 @@ async function sendMail({ to, subject, text, html, attachments }) {
           }),
         });
         const status = res.status;
+        const detail = status >= 400 ? (await res.text().catch(() => '')).slice(0, 200) : '';
         if (status >= 500) {
           lastErr = new Error(`resend HTTP ${status}`);
-          console.log(`[mailer] resend: ${status}`);
+          console.log(`[mailer] resend: ${status} ${detail}`);
           continue;
         }
         if (status >= 400) {
-          console.log(`[mailer] resend: ${status}`);
+          console.log(`[mailer] resend: ${status} ${detail}`);
           return finish(false);
         }
         console.log('[mailer] resend: ok');
@@ -128,13 +129,14 @@ async function sendMail({ to, subject, text, html, attachments }) {
           }),
         });
         const status = res.status;
+        const detail = status >= 400 ? (await res.text().catch(() => '')).slice(0, 200) : '';
         if (status >= 500) {
           lastErr = new Error(`brevo HTTP ${status}`);
-          console.log(`[mailer] brevo: ${status}`);
+          console.log(`[mailer] brevo: ${status} ${detail}`);
           continue;
         }
         if (status >= 400) {
-          console.log(`[mailer] brevo: ${status}`);
+          console.log(`[mailer] brevo: ${status} ${detail}`);
           return finish(false);
         }
         console.log('[mailer] brevo: ok');

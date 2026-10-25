@@ -1,16 +1,21 @@
 const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
+const { allowedDistrictIds } = require('../utils/scope');
+const {
+  todayYmd, ymdOf, isValidYmd, parseAmountToCents, numericToCents, centsToString, bondProgress, snapshot,
+} = require('../services/cashflow.service');
 
 const CATEGORIES = {
   in: ['rent_income', 'other_income'],
   out: ['bond_payment', 'municipal', 'water', 'electricity', 'insurance', 'levies', 'salaries', 'maintenance', 'other_expense'],
 };
 const MAX_ACTIVE_ITEMS = 100; // per property
-const MAX_CENTS = 10000000000; // R100,000,000.00
 
 const ITEM_SELECT = `
   SELECT i.id, i.property_id, pr.name AS property_name, i.direction, i.category, i.label, i.amount,
          i.day_of_month, i.note, i.version, i.created_at, i.updated_at, i.amount_updated_at,
+         i.kind, i.paid_on::text AS paid_on, i.source, i.bond_months_remaining,
+         i.bond_baseline_on::text AS bond_baseline_on, i.bond_paid_before,
          au.name AS amount_updated_by_name
   FROM cashflow_items i
   LEFT JOIN properties pr ON pr.id = i.property_id
@@ -22,31 +27,11 @@ function parseId(raw) {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
-// Money is handled in whole cents, never floats.
-function parseAmountToCents(value) {
-  const text = typeof value === 'number' ? String(value) : typeof value === 'string' ? value.trim() : '';
-  if (!/^\d{1,9}(\.\d{1,2})?$/.test(text)) return null;
-  const [whole, fraction = ''] = text.split('.');
-  const cents = Number(whole) * 100 + Number((fraction + '00').slice(0, 2));
-  if (!Number.isSafeInteger(cents) || cents <= 0 || cents > MAX_CENTS) return null;
-  return cents;
-}
-
-function numericToCents(text) {
-  const negative = String(text).startsWith('-');
-  const [whole, fraction = ''] = String(text).replace('-', '').split('.');
-  const cents = Number(whole) * 100 + Number((fraction + '00').slice(0, 2));
-  return negative ? -cents : cents;
-}
-
-function centsToString(cents) {
-  return (cents / 100).toFixed(2);
-}
-
 function summarise(rows) {
   let inCents = 0;
   let outCents = 0;
   for (const row of rows) {
+    if (row.bond && row.bond.completed) continue; // a finished bond no longer costs money each month
     const cents = numericToCents(row.amount);
     if (row.direction === 'in') inCents += cents;
     else outCents += cents;
@@ -81,6 +66,35 @@ function readReason(value) {
   return text.length >= 5 && text.length <= 300 ? text : null;
 }
 
+function readMonths(value) {
+  const n = typeof value === 'string' && /^\d{1,3}$/.test(value.trim()) ? Number(value.trim()) : value;
+  return Number.isInteger(n) && n >= 1 && n <= 600 ? n : null;
+}
+
+function decorate(rows) {
+  const today = todayYmd();
+  return rows.map((r) => ({ ...r, bond: bondProgress(r, today) }));
+}
+
+// propertyIds null = no restriction (owner). canEdit false = view-only.
+async function getScope(req, res) {
+  const orgId = orgIdOf(req, res);
+  if (!orgId) return null;
+  if (req.user.role === 'owner') return { orgId, propertyIds: null, canEdit: true };
+  if (req.user.role !== 'admin') {
+    res.status(403).json({ error: 'You do not have access to cashflow.' });
+    return null;
+  }
+  const districtIds = await allowedDistrictIds(req);
+  const { rows } = await pool.query(
+    `SELECT p.id FROM properties p
+     JOIN districts d ON d.id = p.district_id
+     WHERE d.organization_id = $1 AND ($2::bigint[] IS NULL OR d.id = ANY($2::bigint[]))`,
+    [orgId, districtIds]
+  );
+  return { orgId, propertyIds: rows.map((r) => r.id), canEdit: false };
+}
+
 function orgIdOf(req, res) {
   const id = req.user.organization_id;
   if (!id) {
@@ -90,17 +104,6 @@ function orgIdOf(req, res) {
   return id;
 }
 
-function snapshot(row) {
-  return {
-    label: row.label,
-    category: row.category,
-    day_of_month: row.day_of_month,
-    amount: row.amount,
-    note: row.note || null,
-    property_id: row.property_id ?? null,
-  };
-}
-
 async function fail(client, res, status, error) {
   await client.query('ROLLBACK');
   return res.status(status).json({ error });
@@ -108,39 +111,73 @@ async function fail(client, res, status, error) {
 
 async function listCashflow(req, res, next) {
   try {
-    const orgId = orgIdOf(req, res);
-    if (!orgId) return;
+    const scope = await getScope(req, res);
+    if (!scope) return;
+    const { orgId, propertyIds: ids } = scope;
+    const today = todayYmd();
 
-    const [itemsResult, propertiesResult] = await Promise.all([
+    const [itemsResult, oneOffResult, actualsResult, propertiesResult] = await Promise.all([
       pool.query(
         `${ITEM_SELECT}
-         WHERE i.organization_id = $1 AND i.archived_at IS NULL
+         WHERE i.organization_id = $1 AND i.archived_at IS NULL AND i.kind = 'monthly'
+           AND ($2::bigint[] IS NULL OR i.property_id = ANY($2::bigint[]))
          ORDER BY i.day_of_month, i.id`,
-        [orgId]
+        [orgId, ids]
+      ),
+      pool.query(
+        `${ITEM_SELECT}
+         WHERE i.organization_id = $1 AND i.archived_at IS NULL AND i.kind = 'one_off'
+           AND ($2::bigint[] IS NULL OR i.property_id = ANY($2::bigint[]))
+         ORDER BY i.paid_on DESC, i.id DESC
+         LIMIT 200`,
+        [orgId, ids]
+      ),
+      pool.query(
+        `SELECT i.property_id,
+                COALESCE(sum(i.amount) FILTER (WHERE date_trunc('month', i.paid_on) = date_trunc('month', $3::date)), 0)::numeric(14,2) AS this_month,
+                COALESCE(sum(i.amount), 0)::numeric(14,2) AS all_time
+         FROM cashflow_items i
+         WHERE i.organization_id = $1 AND i.archived_at IS NULL AND i.kind = 'one_off' AND i.direction = 'out'
+           AND ($2::bigint[] IS NULL OR i.property_id = ANY($2::bigint[]))
+         GROUP BY i.property_id`,
+        [orgId, ids, today]
       ),
       pool.query(
         `SELECT p.id, p.name, d.name AS district_name
          FROM properties p
          JOIN districts d ON d.id = p.district_id
-         WHERE d.organization_id = $1
+         WHERE d.organization_id = $1 AND ($2::bigint[] IS NULL OR p.id = ANY($2::bigint[]))
          ORDER BY d.name, p.name`,
-        [orgId]
+        [orgId, ids]
       ),
     ]);
 
-    const items = itemsResult.rows;
+    const items = decorate(itemsResult.rows);
+    const actualByProperty = new Map(actualsResult.rows.map((r) => [r.property_id, r]));
     const properties = propertiesResult.rows.map((p) => {
       const rows = items.filter((i) => i.property_id === p.id);
-      return { id: p.id, name: p.name, district_name: p.district_name, item_count: rows.length, totals: summarise(rows) };
+      const a = actualByProperty.get(p.id);
+      return {
+        id: p.id,
+        name: p.name,
+        district_name: p.district_name,
+        item_count: rows.length,
+        totals: summarise(rows),
+        actual: { this_month: a ? a.this_month : '0.00', all_time: a ? a.all_time : '0.00' },
+      };
     });
     const unassigned = items.filter((i) => i.property_id == null);
+    const sumActual = (key) => centsToString(properties.reduce((s, p) => s + numericToCents(p.actual[key]), 0));
 
     res.set('Cache-Control', 'no-store');
     res.json({
       items,
+      one_offs: oneOffResult.rows,
       properties,
       unassigned: { count: unassigned.length, totals: summarise(unassigned) },
       totals: summarise(items),
+      actual: { this_month: sumActual('this_month'), all_time: sumActual('all_time') },
+      can_edit: scope.canEdit,
     });
   } catch (err) {
     next(err);
@@ -149,8 +186,8 @@ async function listCashflow(req, res, next) {
 
 async function listHistory(req, res, next) {
   try {
-    const orgId = orgIdOf(req, res);
-    if (!orgId) return;
+    const scope = await getScope(req, res);
+    if (!scope) return;
 
     const { rows } = await pool.query(
       `SELECT h.id, h.item_id, h.change_type, h.old_values, h.new_values, h.reason, h.changed_at,
@@ -160,12 +197,13 @@ async function listHistory(req, res, next) {
        JOIN cashflow_items i ON i.id = h.item_id
        LEFT JOIN properties pr ON pr.id = i.property_id
        WHERE h.organization_id = $1
+         AND ($2::bigint[] IS NULL OR i.property_id = ANY($2::bigint[]))
        ORDER BY h.changed_at DESC, h.id DESC
        LIMIT 200`,
-      [orgId]
+      [scope.orgId, scope.propertyIds]
     );
     res.set('Cache-Control', 'no-store');
-    res.json({ history: rows });
+    res.json({ history: rows, can_edit: scope.canEdit });
   } catch (err) {
     next(err);
   }
@@ -173,25 +211,49 @@ async function listHistory(req, res, next) {
 
 async function createItem(req, res, next) {
   try {
-    const orgId = orgIdOf(req, res);
-    if (!orgId) return;
+    const scope = await getScope(req, res);
+    if (!scope) return;
+    if (!scope.canEdit) return res.status(403).json({ error: 'You have view-only access to cashflow.' });
+    const { orgId } = scope;
     const body = req.body || {};
 
+    const kind = body.kind === 'one_off' ? 'one_off' : 'monthly';
     const direction = body.direction;
     if (direction !== 'in' && direction !== 'out') {
       return res.status(400).json({ error: 'Type must be money in or money out.' });
+    }
+    if (kind === 'one_off' && direction !== 'out') {
+      return res.status(400).json({ error: 'One-off payments can only be money out.' });
     }
     if (!CATEGORIES[direction].includes(body.category)) {
       return res.status(400).json({ error: 'Choose a valid category.' });
     }
     const label = readLabel(body.label);
     if (!label) return res.status(400).json({ error: 'Name must be between 1 and 100 characters.' });
-    const day = readDay(body.day_of_month);
-    if (!day) return res.status(400).json({ error: 'Day of the month must be between 1 and 31.' });
+
+    let day;
+    let paidOn = null;
+    if (kind === 'one_off') {
+      paidOn = typeof body.paid_on === 'string' ? body.paid_on.trim() : '';
+      if (!isValidYmd(paidOn) || paidOn > todayYmd()) {
+        return res.status(400).json({ error: 'Enter the date the payment was made (today or earlier).' });
+      }
+      day = Number(paidOn.slice(8, 10));
+    } else {
+      day = readDay(body.day_of_month);
+      if (!day) return res.status(400).json({ error: 'Day of the month must be between 1 and 31.' });
+    }
+
     const cents = parseAmountToCents(body.amount);
     if (!cents) return res.status(400).json({ error: 'Amount must be above 0 with at most 2 decimals.' });
     const note = readNote(body.note);
     if (!note.ok) return res.status(400).json({ error: 'Note must be 300 characters or fewer.' });
+
+    let bondMonths = null;
+    if (kind === 'monthly' && body.category === 'bond_payment') {
+      bondMonths = readMonths(body.bond_months_remaining);
+      if (!bondMonths) return res.status(400).json({ error: 'Enter how many months are left on the bond (1 to 600).' });
+    }
 
     const propertyId = parseId(String(body.property_id ?? ''));
     if (!propertyId) return res.status(400).json({ error: 'Choose the property this belongs to.' });
@@ -203,13 +265,15 @@ async function createItem(req, res, next) {
     );
     if (!propertyCheck.rows[0]) return res.status(404).json({ error: 'Property not found.' });
 
-    const count = await pool.query(
-      `SELECT count(*)::int AS n FROM cashflow_items
-       WHERE organization_id = $1 AND property_id = $2 AND archived_at IS NULL`,
-      [orgId, propertyId]
-    );
-    if (count.rows[0].n >= MAX_ACTIVE_ITEMS) {
-      return res.status(409).json({ error: `A property can have at most ${MAX_ACTIVE_ITEMS} active cashflow items.` });
+    if (kind === 'monthly') {
+      const count = await pool.query(
+        `SELECT count(*)::int AS n FROM cashflow_items
+         WHERE organization_id = $1 AND property_id = $2 AND archived_at IS NULL AND kind = 'monthly'`,
+        [orgId, propertyId]
+      );
+      if (count.rows[0].n >= MAX_ACTIVE_ITEMS) {
+        return res.status(409).json({ error: `A property can have at most ${MAX_ACTIVE_ITEMS} active cashflow items.` });
+      }
     }
 
     const client = await pool.connect();
@@ -219,10 +283,11 @@ async function createItem(req, res, next) {
       const inserted = await client.query(
         `INSERT INTO cashflow_items
            (organization_id, property_id, direction, category, label, amount, day_of_month, note,
-            created_by, updated_by, amount_updated_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9)
+            created_by, updated_by, amount_updated_by, kind, paid_on, bond_months_remaining, bond_baseline_on)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9, $10, $11, $12, $13)
          RETURNING *`,
-        [orgId, propertyId, direction, body.category, label, centsToString(cents), day, note.value, req.user.user_id]
+        [orgId, propertyId, direction, body.category, label, centsToString(cents), day, note.value, req.user.user_id,
+         kind, paidOn, bondMonths, bondMonths ? todayYmd() : null]
       );
       item = inserted.rows[0];
       await client.query(
@@ -258,8 +323,10 @@ async function createItem(req, res, next) {
 
 async function updateItem(req, res, next) {
   try {
-    const orgId = orgIdOf(req, res);
-    if (!orgId) return;
+    const scope = await getScope(req, res);
+    if (!scope) return;
+    if (!scope.canEdit) return res.status(403).json({ error: 'You have view-only access to cashflow.' });
+    const { orgId } = scope;
     const id = parseId(req.params.id);
     if (!id) return res.status(400).json({ error: 'Invalid id.' });
     const body = req.body || {};
@@ -290,6 +357,18 @@ async function updateItem(req, res, next) {
       const note = readNote(body.note);
       if (!note.ok) return res.status(400).json({ error: 'Note must be 300 characters or fewer.' });
       changes.note = note.value;
+    }
+    let monthsInput;
+    if (body.bond_months_remaining !== undefined) {
+      monthsInput = readMonths(body.bond_months_remaining);
+      if (!monthsInput) return res.status(400).json({ error: 'Months left on the bond must be a whole number from 1 to 600.' });
+    }
+    let paidOnInput;
+    if (body.paid_on !== undefined) {
+      paidOnInput = typeof body.paid_on === 'string' ? body.paid_on.trim() : '';
+      if (!isValidYmd(paidOnInput) || paidOnInput > todayYmd()) {
+        return res.status(400).json({ error: 'Enter the date the payment was made (today or earlier).' });
+      }
     }
     const reason = readReason(body.reason);
 
@@ -329,8 +408,9 @@ async function updateItem(req, res, next) {
         return await fail(client, res, 400, 'An item cannot be moved to another property. Remove it and add it again under the right property.');
       }
 
-      const oldVals = snapshot(before);
-      const nextVals = snapshot(before);
+      const today = todayYmd();
+      const oldVals = snapshot(before, today);
+      const nextVals = snapshot(before, today);
       if (changes.label !== undefined) nextVals.label = changes.label;
       if (changes.category !== undefined) {
         if (!CATEGORIES[before.direction].includes(changes.category)) {
@@ -338,30 +418,65 @@ async function updateItem(req, res, next) {
         }
         nextVals.category = changes.category;
       }
-      if (changes.day !== undefined) nextVals.day_of_month = changes.day;
+      if (before.kind === 'one_off') {
+        if (paidOnInput !== undefined) {
+          nextVals.paid_on = paidOnInput;
+          nextVals.day_of_month = Number(paidOnInput.slice(8, 10));
+        }
+      } else if (changes.day !== undefined) {
+        nextVals.day_of_month = changes.day;
+      }
       if (changes.cents !== undefined) nextVals.amount = centsToString(changes.cents);
       if (changes.note !== undefined) nextVals.note = changes.note;
       if (before.property_id == null) nextVals.property_id = assignPropertyId;
+
+      const isBond = before.kind === 'monthly' && nextVals.category === 'bond_payment';
+      if (isBond) {
+        const months = monthsInput !== undefined ? monthsInput : oldVals.bond_months_remaining;
+        if (months == null) return await fail(client, res, 400, 'Enter how many months are left on the bond (1 to 600).');
+        nextVals.bond_months_remaining = months;
+      } else {
+        nextVals.bond_months_remaining = null;
+      }
 
       changedFields = Object.keys(nextVals).filter((key) => (nextVals[key] ?? null) !== (oldVals[key] ?? null));
       if (changedFields.length === 0) return await fail(client, res, 400, 'Nothing was changed.');
 
       const amountChanged = changedFields.includes('amount');
-      const sensitive = amountChanged || changedFields.includes('day_of_month') || changedFields.includes('property_id');
+      const monthsChanged = changedFields.includes('bond_months_remaining');
+      const sensitive = amountChanged || monthsChanged
+        || changedFields.includes('day_of_month') || changedFields.includes('paid_on') || changedFields.includes('property_id');
       if (sensitive && !reason) {
-        return await fail(client, res, 400, 'A reason of at least 5 characters is required when the amount, the day or the property changes.');
+        return await fail(client, res, 400, 'A reason of at least 5 characters is required when the amount, the date, the months left or the property changes.');
+      }
+
+      // When the amount or months change, lock in what has been paid so far at the old amount and start counting again from today.
+      let bondMonths = before.bond_months_remaining;
+      let bondBaseline = ymdOf(before.bond_baseline_on);
+      let bondPaidBefore = before.bond_paid_before || '0.00';
+      if (!isBond) {
+        bondMonths = null;
+        bondBaseline = null;
+        bondPaidBefore = '0.00';
+      } else if (amountChanged || monthsChanged || !bondBaseline) {
+        const progress = bondProgress(before, today);
+        bondPaidBefore = progress ? progress.paid : '0.00';
+        bondMonths = nextVals.bond_months_remaining;
+        bondBaseline = today;
       }
 
       const result = await client.query(
         `UPDATE cashflow_items
          SET label = $1, category = $2, day_of_month = $3, amount = $4, note = $5, property_id = $6,
+             paid_on = $10, bond_months_remaining = $11, bond_baseline_on = $12, bond_paid_before = $13,
              version = version + 1, updated_by = $7, updated_at = now(),
              amount_updated_by = CASE WHEN $8::boolean THEN $7 ELSE amount_updated_by END,
              amount_updated_at = CASE WHEN $8::boolean THEN now() ELSE amount_updated_at END
          WHERE id = $9
          RETURNING *`,
         [nextVals.label, nextVals.category, nextVals.day_of_month, nextVals.amount, nextVals.note,
-         nextVals.property_id, req.user.user_id, amountChanged, id]
+         nextVals.property_id, req.user.user_id, amountChanged, id,
+         before.kind === 'one_off' ? nextVals.paid_on : null, bondMonths, bondBaseline, bondPaidBefore]
       );
       updated = result.rows[0];
 
@@ -575,7 +690,7 @@ async function addRentFromUnits(req, res, next) {
 
       const count = await client.query(
         `SELECT count(*)::int AS n FROM cashflow_items
-         WHERE organization_id = $1 AND property_id = $2 AND archived_at IS NULL`,
+         WHERE organization_id = $1 AND property_id = $2 AND archived_at IS NULL AND kind = 'monthly'`,
         [orgId, propertyId]
       );
       if (count.rows[0].n + groups.length > MAX_ACTIVE_ITEMS) {

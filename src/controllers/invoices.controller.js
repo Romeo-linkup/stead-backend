@@ -2,6 +2,7 @@ const pool = require('../db/pool');
 const { writeAudit } = require('../services/audit.service');
 const { uploadImage } = require('../services/cloudinary.service');
 const { allowedDistrictIds } = require('../utils/scope');
+const { recordMaintenanceExpense } = require('../services/cashflow.service');
 
 const MANAGEMENT_ROLES = ['owner', 'admin', 'property_manager'];
 const INVOICE_STATUSES = ['submitted', 'approved', 'rejected', 'paid'];
@@ -519,6 +520,21 @@ async function markInvoicePaid(req, res, next) {
     if (!invoiceId) return res.status(400).json({ error: 'Invalid id.' });
     const invoice = await loadManagedInvoice(invoiceId, req, res);
     if (!invoice) return;
+
+    const detailsResult = await pool.query(
+      `SELECT i.total, m.description AS task_description, u.property_id, pu.name AS provider_name
+       FROM invoices i
+       JOIN maintenance_requests m ON m.id = i.maintenance_request_id
+       JOIN units u ON u.id = m.unit_id
+       JOIN users pu ON pu.id = i.provider_user_id
+       WHERE i.id = $1`,
+      [invoiceId]
+    );
+    const details = detailsResult.rows[0];
+    if (!details) {
+      return res.status(404).json({ error: 'Invoice details not found.' });
+    }
+
     const { rows } = await pool.query(
       `UPDATE invoices
        SET status = 'paid', paid_by = $1, paid_at = now(), updated_at = now()
@@ -532,6 +548,21 @@ async function markInvoicePaid(req, res, next) {
       }
       return res.status(409).json({ error: 'Only approved invoices can be marked paid.' });
     }
+
+    try {
+      await recordMaintenanceExpense(pool, {
+        organizationId: req.user.organization_id,
+        propertyId: details.property_id,
+        amount: details.total,
+        label: `Maintenance - ${details.task_description || 'Invoice'}`,
+        sourceRef: `invoice:${invoiceId}`,
+        userId: req.user.user_id,
+        note: details.provider_name || null,
+      });
+    } catch (err) {
+      console.warn('[cashflow] maintenance expense failed:', err.message);
+    }
+
     await writeAudit({
       actorId: req.user.user_id,
       actorRole: req.user.role,
